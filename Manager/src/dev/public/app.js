@@ -2263,13 +2263,13 @@
   let singleClientOnly = true;
   function normalizeAccountLayoutMode(raw) {
     var s = String(raw || '').trim().toLowerCase();
-    if (s === 'mac' || s === 'multibox') return s;
+    if (s === 'mac' || s === 'multibox') return 'mac';
     return 'single';
   }
-  /** @type {'single'|'mac'|'multibox'} */
+  /** @type {'single'|'mac'} */
   let accountLayoutMode = normalizeAccountLayoutMode(localStorage.getItem('accountLayoutMode'));
   function isMacStyleSidebar() {
-    return accountLayoutMode === 'mac' || accountLayoutMode === 'multibox';
+    return accountLayoutMode === 'mac';
   }
   function isMacMultiHome() {
     // Clients tab always uses the MAC multi-account overview.
@@ -2283,7 +2283,7 @@
   var connectedClients = new Map(); // clientId → compact data from clientList message
   var headlessSessions = new Map(); // accountId -> live headless session summary
   function refreshHeadlessAccountSelectors() {
-    ['objects-account-select', 'nearby-account-select', 'tilemap-account-select'].forEach(function (id) {
+    ['objects-account-select', 'nearby-account-select', 'tilemap-account-select', 'damage-account-select'].forEach(function (id) {
       var select = document.getElementById(id);
       if (!select) return;
       var previous = String(select.value || '');
@@ -2541,7 +2541,8 @@
   const ipInput = document.getElementById('ip-input');
   const ipConnectBtn = document.getElementById('ip-connect-btn');
   const damageEmpty = document.getElementById('damage-empty');
-  const damageSettingsBar = document.getElementById('damage-settings-bar');
+  const damageAccountSelect = document.getElementById('damage-account-select');
+  const damageRefreshBtn = document.getElementById('damage-refresh-btn');
   const damageSplitEl = document.getElementById('damage-split');
   const damageRunListEl = document.getElementById('damage-run-list');
   const damageTargetListEl = document.getElementById('damage-target-list');
@@ -3333,7 +3334,7 @@
   }
 
   /** Tabs restricted to dev/admin — not shown in user-facing settings */
-  var RESTRICTED_TABS = new Set(['packet-lab', 'logs', 'multibox']);
+  var RESTRICTED_TABS = new Set(['packet-lab', 'logs']);
 
   /** Render the settings list of tab toggles */
   function renderNavbarTabSettings() {
@@ -6180,15 +6181,26 @@
           // detect white-bag-tier pickups and shiny items.
           try { window._AccountSessions && window._AccountSessions.observePlayerData(msg); } catch (_) {}
           break;
-        case 'pluginData':
-          handlePluginData(msg);
+        case 'headlessDamageData':
+          if (!damageAccountSelect || !damageAccountSelect.value || String(msg.accountId || '') === String(damageAccountSelect.value)) {
+            damageHistory = Array.isArray(msg.history) ? msg.history : [];
+            damageLive = msg.live || null;
+            try {
+              if (window._AccountSessions) window._AccountSessions.observeDamageHistory(damageHistory);
+            } catch (_) {}
+            if (activeTab === 'damage') renderDamageTab();
+          }
           break;
         case 'headlessSessions':
+          var previousDamageAccountId = damageAccountSelect ? String(damageAccountSelect.value || '') : '';
           headlessSessions.clear();
           (msg.sessions || []).forEach(function (session) {
             headlessSessions.set(String(session.accountId), session);
           });
           refreshHeadlessAccountSelectors();
+          if (activeTab === 'damage' && damageAccountSelect && String(damageAccountSelect.value || '') !== previousDamageAccountId) {
+            selectDamageAccount();
+          }
           break;
         case 'clientList': {
           var previousLiveClientIds = Array.from(connectedClients.keys()).filter(function (clientId) {
@@ -10387,7 +10399,10 @@
     if (tabName === 'premium') renderPremiumTab();
     if (tabName === 'settings') refreshSettingsTab();
     if (tabName === 'accounts') renderAccountsTab();
-    if (tabName === 'damage') renderDamageTab();
+    if (tabName === 'damage') {
+      renderDamageTab();
+      requestHeadlessDamage();
+    }
     if (tabName === 'logs') refreshLogsEmptyState();
     if (tabName === 'objects') renderObjectsTree(lastObjectsData);
     if (tabName === 'tilemap') {
@@ -10401,9 +10416,6 @@
       renderNearbyPlayersTab();
       renderNearbyPlayerDebug();
       startNearbyPolling();
-    }
-    if (tabName === 'multibox') {
-      initMultiboxPlaceholderStage();
     }
     if (tabName === 'packet-lab') {
       syncLabPacketToolbarVisibility();
@@ -10437,23 +10449,7 @@
       loadMarketTab();
     }
     if (tabName === 'plugins') {
-      // Render immediately from cached data (shows spinner if not yet received)
       renderPlugins(Array.isArray(allPluginsData) ? allPluginsData : []);
-      // Always fetch fresh data in background
-      fetch('/api/plugins')
-        .then(function (r) {
-          if (!r.ok) throw new Error('bad status');
-          return r.json();
-        })
-        .then(function (data) {
-          var pl = Array.isArray(data) ? data : [];
-          if (pl.length > 0) pluginsReceived = true;
-          allPluginsData = pl;
-          renderPlugins(pl);
-          populateServerSelect(pl);
-          renderDamageSettings(pl);
-        })
-        .catch(function () {});
     }
   });
 
@@ -11627,12 +11623,34 @@
   if (objectsRefreshBtn) {
     objectsRefreshBtn.addEventListener('click', requestObjects);
   }
+
+  function requestHeadlessDamage() {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        type: 'requestHeadlessDamage',
+        accountId: damageAccountSelect && damageAccountSelect.value || null,
+      }));
+    }
+  }
+
+  function selectDamageAccount() {
+    damageHistory = [];
+    damageLive = null;
+    damageSelectedRun = 'live';
+    damageSelectedTargetId = null;
+    damageSelectedPlayerId = null;
+    closeDamagePlayerModal();
+    renderDamageTab();
+    requestHeadlessDamage();
+  }
   if (nearbyAccountSelect) nearbyAccountSelect.addEventListener('change', requestNearbyPlayersOnce);
   if (objectsAccountSelect) objectsAccountSelect.addEventListener('change', requestObjects);
   if (tilemapRefreshBtn) {
     tilemapRefreshBtn.addEventListener('click', requestTilemap);
   }
   if (tilemapAccountSelect) tilemapAccountSelect.addEventListener('change', requestTilemap);
+  if (damageRefreshBtn) damageRefreshBtn.addEventListener('click', requestHeadlessDamage);
+  if (damageAccountSelect) damageAccountSelect.addEventListener('change', selectDamageAccount);
 
   if (objectsAutoRefreshCheck) {
     objectsAutoRefreshCheck.addEventListener('change', function () {
@@ -12922,86 +12940,7 @@
 
   // ─── Damage sniffer settings in damage tab ──────────────
 
-  function renderDamageSettings(plugins) {
-    if (!damageSettingsBar) return;
-    const dsPlugin = plugins.find(p => p.id === 'damage-sniffer');
-    if (!dsPlugin || !dsPlugin.settings || dsPlugin.settings.length === 0) {
-      damageSettingsBar.innerHTML = '';
-      return;
-    }
-
-    damageSettingsBar.innerHTML = '';
-
-    function getDamageSettingLabel(setting) {
-      var key = String((setting && setting.key) || '').toLowerCase();
-      var label = String((setting && setting.label) || '').toLowerCase();
-      if (key === 'minbosshp' || label === 'min boss hp') return t('damage.setting.minBossHp');
-      if (key === 'minminibosshp' || key === 'minibosshp' || label === 'min miniboss hp' || label === 'min mini boss hp') {
-        return t('damage.setting.minMiniBossHp');
-      }
-      if (key === 'ingamealerts' || key === 'gamealerts' || label === 'in-game alerts' || label === 'ingame alerts') {
-        return t('damage.setting.inGameAlerts');
-      }
-      return setting && setting.label ? String(setting.label) : '';
-    }
-
-    dsPlugin.settings.forEach(s => {
-      const row = document.createElement('div');
-      row.className = 'setting-row';
-
-      const label = document.createElement('span');
-      label.className = 'setting-label';
-      label.textContent = getDamageSettingLabel(s);
-      row.appendChild(label);
-
-      const control = document.createElement('div');
-      control.className = 'setting-control';
-
-        if (s.type === 'number') {
-          const input = document.createElement('input');
-          input.type = 'text';
-          input.inputMode = 'numeric';
-          input.className = 'settings-number-input';
-          input.value = s.value;
-          input.addEventListener('change', () => {
-            var nextValue = Number(input.value);
-            if (!Number.isFinite(nextValue)) {
-              input.value = String(s.value ?? '');
-              return;
-            }
-            if (s.min !== undefined) nextValue = Math.max(Number(s.min), nextValue);
-            if (s.max !== undefined) nextValue = Math.min(Number(s.max), nextValue);
-            input.value = String(nextValue);
-            ws.send(JSON.stringify({
-              type: 'updateSetting',
-              pluginId: dsPlugin.id,
-              key: s.key,
-              value: nextValue,
-            }));
-          });
-          control.appendChild(input);
-      } else if (s.type === 'boolean') {
-        const toggle = document.createElement('label');
-        toggle.className = 'toggle-switch';
-        toggle.innerHTML =
-          '<input type="checkbox" ' + (s.value ? 'checked' : '') + '>' +
-          '<span class="toggle-slider"></span>';
-        const cb = toggle.querySelector('input');
-        cb.addEventListener('change', () => {
-          ws.send(JSON.stringify({
-            type: 'updateSetting',
-            pluginId: dsPlugin.id,
-            key: s.key,
-            value: cb.checked,
-          }));
-        });
-        control.appendChild(toggle);
-      }
-
-      row.appendChild(control);
-      damageSettingsBar.appendChild(row);
-    });
-  }
+  function renderDamageSettings() {}
 
   serverSelect.addEventListener('change', () => {
     const val = serverSelect.value;
@@ -13175,38 +13114,6 @@
   })();
 
   // ─────────────────────────────────────────────────────────
-
-  function handlePluginData(msg) {
-    if (msg.dataType === 'openModal' && msg.data && typeof window._showPluginModal === 'function') {
-      window._showPluginModal(msg.pluginId, msg.data);
-      return;
-    }
-    if (msg.pluginId !== 'damage-sniffer') return;
-
-    if (msg.dataType === 'damageHistory') {
-      damageHistory = Array.isArray(msg.data) ? msg.data : [];
-      // If we were pointing at history but it shrank, clamp selection
-      if (damageSelectedRun !== 'live' && typeof damageSelectedRun === 'number') {
-        if (damageSelectedRun < 0 || damageSelectedRun >= damageHistory.length) {
-          damageSelectedRun = 'live';
-          damageSelectedTargetId = null;
-        }
-      }
-      // Count new boss kills into the active session, if any.
-      try {
-        if (window._AccountSessions) window._AccountSessions.observeDamageHistory(damageHistory);
-      } catch (_) {}
-      if (activeTab === 'damage') renderDamageTab();
-    } else if (msg.dataType === 'damageLive') {
-      damageLive = msg.data || null;
-      if (activeTab === 'damage') renderDamageTab();
-    } else if (msg.dataType === 'encounterHistory') {
-      // Backward compat (old model)
-      // Keep it around for older branches; we don't render it anymore.
-    } else if (msg.dataType === 'encounterComplete') {
-      // Backward compat (old model)
-    }
-  }
 
   // ─── Damage Sniffer tab rendering ───────────────────────
 

@@ -1217,6 +1217,7 @@ export class DevServer {
     // Packet Lab — captures undefined packets for live analysis
     this.lab = new PacketLab();
     this.headlessFleet?.on('changed', (sessions) => this.broadcastHeadlessSessions(sessions));
+    this.headlessFleet?.on('damage', (accountId, snapshot) => this.broadcastHeadlessDamage(accountId, snapshot));
     this.inspector.subscribe((pkt) => {
       if (pkt.captureMode === 'full') this.lab.capture(pkt);
       this.observeTradePacket(pkt);
@@ -2550,6 +2551,14 @@ export class DevServer {
     this.broadcastClientList();
   }
 
+  private broadcastHeadlessDamage(accountId: string, snapshot = this.headlessFleet?.damage(accountId)): void {
+    if (!snapshot) return;
+    const msg = JSON.stringify({ type: 'headlessDamageData', accountId, ...snapshot });
+    for (const ws of this.wss.clients) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+    }
+  }
+
   private getHeadlessObjectsPayload(accountId?: string | null) {
     const client = this.headlessFleet?.get(accountId);
     if (!client || !this.gameData) return null;
@@ -2956,27 +2965,6 @@ export class DevServer {
       return;
     }
 
-    if (req.url === '/api/plugins' && req.method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(this.pluginManager.getPlugins()));
-      return;
-    }
-
-    if (req.url?.startsWith('/api/plugins/') && req.method === 'POST') {
-      const parts = req.url.split('/');
-      const pluginId = parts[3];
-      const action = parts[4]; // 'enable' or 'disable'
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', () => {
-        const enabled = action === 'enable';
-        const ok = this.pluginManager.togglePlugin(pluginId, enabled);
-        res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok, pluginId, enabled }));
-      });
-      return;
-    }
-
     if (req.url === '/api/recent' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(this.inspector.getRecent()));
@@ -2984,7 +2972,7 @@ export class DevServer {
     }
 
     if (req.url === '/api/damage/encounters' && req.method === 'GET') {
-      const history = this.pluginManager.getPluginData('damage-sniffer', 'encounterHistory') || [];
+      const history = this.headlessFleet?.damage()?.history ?? [];
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(history));
       return;
@@ -4300,37 +4288,6 @@ export class DevServer {
       data: recent,
     }));
 
-    // Send damage sniffer state (RealmShark-style)
-    const damageHistory = this.pluginManager.getPluginData('damage-sniffer', 'damageHistory');
-    if (damageHistory !== undefined) {
-      ws.send(JSON.stringify({
-        type: 'pluginData',
-        pluginId: 'damage-sniffer',
-        dataType: 'damageHistory',
-        data: damageHistory,
-      }));
-    }
-    const damageLive = this.pluginManager.getPluginData('damage-sniffer', 'damageLive');
-    if (damageLive !== undefined) {
-      ws.send(JSON.stringify({
-        type: 'pluginData',
-        pluginId: 'damage-sniffer',
-        dataType: 'damageLive',
-        data: damageLive,
-      }));
-    }
-
-    // Backward compat: older damage-sniffer stored encounterHistory
-    const encounters = this.pluginManager.getPluginData('damage-sniffer', 'encounterHistory');
-    if (encounters !== undefined) {
-      ws.send(JSON.stringify({
-        type: 'pluginData',
-        pluginId: 'damage-sniffer',
-        dataType: 'encounterHistory',
-        data: encounters,
-      }));
-    }
-
     // Subscribe to real-time packets
     const unsub = this.inspector.subscribe((packet: CapturedPacket) => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -4500,6 +4457,15 @@ export class DevServer {
             const emptyMsg = JSON.stringify({ type: 'objectsData', portals: [], beacons: [], categories: [], beaconTypes: [] });
             if (ws.readyState === WebSocket.OPEN) ws.send(emptyMsg);
           }
+        } else if (msg.type === 'requestHeadlessDamage') {
+          const accountId = String(msg.accountId || '') || null;
+          const snapshot = this.headlessFleet?.damage(accountId) ?? null;
+          ws.send(JSON.stringify({
+            type: 'headlessDamageData',
+            accountId: accountId || this.headlessFleet?.list()[0]?.accountId || '',
+            live: snapshot?.live ?? null,
+            history: snapshot?.history ?? [],
+          }));
         } else if (msg.type === 'requestGameWikiCatalog') {
           if (msg.force === true) {
             this.gameWikiCatalogJson = null;

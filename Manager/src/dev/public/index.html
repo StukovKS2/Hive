@@ -228,12 +228,13 @@
       <div id="content-tabs">
         <button class="content-tab" data-tab="clients" data-icon="C" data-label="Clients" data-i18n="tab.clients">Clients</button>
         <button class="content-tab active" data-tab="accounts" data-icon="A" data-label="Accounts" data-i18n="tab.accounts">Accounts</button>
-        <button class="content-tab" data-tab="scripts" data-icon="S" data-label="Scripts" data-i18n="tab.scripts">Scripts</button>
         <button class="content-tab" data-tab="api" data-icon="A" data-label="API" data-i18n="tab.api">API</button>
         <button class="content-tab" data-tab="game-wiki" data-icon="W" data-label="Wiki" data-i18n="tab.gameWiki">Wiki</button>
         <button class="content-tab" data-tab="objects" data-icon="O" data-label="Objects" data-i18n="tab.objects">Objects</button>
         <button class="content-tab" data-tab="nearby" data-icon="P" data-label="Nearby Players" data-i18n="tab.nearby">Nearby Players</button>
         <button class="content-tab" data-tab="tilemap" data-icon="T" data-label="Tilemap" data-i18n="tab.tilemap">Tilemap</button>
+        <button class="content-tab" data-tab="damage" data-icon="D" data-label="Damage Sniffer" data-i18n="tab.damage">Damage Sniffer</button>
+        <button class="content-tab" data-tab="scripts" data-icon="S" data-label="Scripts" data-i18n="tab.scripts">Scripts</button>
       </div>
 
       <div id="tab-clients" class="tab-panel" style="display:none;">
@@ -780,53 +781,12 @@
         </div>
       </div>
 
-      <div id="tab-multibox" class="tab-panel admin-only multibox-tab coming-soon" data-coming-soon="Coming soon&#10;&#10;Multiboxing is in active development and will be available in a future update." style="display:none;">
-        <div class="multibox-toolbar">
-          <div class="multibox-toolbar-text">
-            <span class="multibox-toolbar-title" data-i18n="multibox.toolbar.title">Multibox layout</span>
-            <span class="multibox-toolbar-hint" data-i18n="multibox.toolbar.hint">Placeholder tiles — drag a panel to move, drag the corner to resize. Presets approximate tools like KronkBoxer: large focus window top-right, narrow stack on the left, extras along the bottom.</span>
-          </div>
-          <button type="button" id="multibox-add-client" class="setting-btn multibox-add-btn" data-i18n="multibox.addClient">Add client</button>
-        </div>
-        <div class="multibox-presets" role="group" aria-labelledby="multibox-presets-label">
-          <span id="multibox-presets-label" class="multibox-presets-label" data-i18n="multibox.presets.label">Layout presets</span>
-          <div class="multibox-presets-btns">
-            <button type="button" class="setting-btn setting-btn-secondary multibox-preset-btn" data-multibox-preset="4" data-i18n-title="multibox.presetTitle4">4</button>
-            <button type="button" class="setting-btn setting-btn-secondary multibox-preset-btn multibox-preset-btn--primary" data-multibox-preset="6" data-i18n-title="multibox.presetTitle6">6</button>
-            <button type="button" class="setting-btn setting-btn-secondary multibox-preset-btn" data-multibox-preset="8" data-i18n-title="multibox.presetTitle8">8</button>
-          </div>
-        </div>
-        <div id="multibox-stage" class="multibox-stage" aria-label="Placeholder multibox layout">
-          <div id="multibox-empty" class="multibox-empty hidden" data-i18n="multibox.empty">No clients. Click Add client to create a placeholder window.</div>
-          <div class="multibox-window" data-client-index="1" style="left:24px;top:28px;width:220px;height:160px;">
-            <div class="multibox-window-head">
-              <span class="multibox-window-title">Client 1</span>
-              <button type="button" class="multibox-window-remove" data-i18n-aria-label="multibox.removeClient" data-i18n-title="multibox.removeClient">&times;</button>
-            </div>
-            <div class="multibox-window-body"><span data-i18n="multibox.placeholder">Placeholder</span></div>
-            <div class="multibox-resize-handle" tabindex="-1" aria-hidden="true" title="Resize"></div>
-          </div>
-          <div class="multibox-window" data-client-index="2" style="left:264px;top:48px;width:200px;height:140px;">
-            <div class="multibox-window-head">
-              <span class="multibox-window-title">Client 2</span>
-              <button type="button" class="multibox-window-remove" data-i18n-aria-label="multibox.removeClient" data-i18n-title="multibox.removeClient">&times;</button>
-            </div>
-            <div class="multibox-window-body"><span data-i18n="multibox.placeholder">Placeholder</span></div>
-            <div class="multibox-resize-handle" tabindex="-1" aria-hidden="true" title="Resize"></div>
-          </div>
-          <div class="multibox-window" data-client-index="3" style="left:120px;top:220px;width:260px;height:120px;">
-            <div class="multibox-window-head">
-              <span class="multibox-window-title">Client 3</span>
-              <button type="button" class="multibox-window-remove" data-i18n-aria-label="multibox.removeClient" data-i18n-title="multibox.removeClient">&times;</button>
-            </div>
-            <div class="multibox-window-body"><span data-i18n="multibox.placeholder">Placeholder</span></div>
-            <div class="multibox-resize-handle" tabindex="-1" aria-hidden="true" title="Resize"></div>
-          </div>
-        </div>
-      </div>
-
       <div id="tab-damage" class="tab-panel" style="display:none;">
-        <div id="damage-settings-bar"></div>
+        <div class="objects-toolbar">
+          <label class="nearby-toolbar-label" for="damage-account-select">Account</label>
+          <select id="damage-account-select" class="nearby-select"></select>
+          <button id="damage-refresh-btn" class="setting-btn" type="button">Refresh</button>
+        </div>
         <div id="damage-content">
           <div id="damage-empty" class="empty-state" data-i18n="damage.empty">No damage recorded yet. Hit something!</div>
           <div id="damage-split" class="damage-split" style="display:none;">
@@ -1339,12 +1299,11 @@
               <div class="settings-row">
                 <div class="settings-row-info">
                   <span class="settings-label">Account layout</span>
-                  <span class="settings-desc">Single client sidebar, multi-account compact list (MAC), or multibox (MAC-style sidebar; Home tab reserved).</span>
+                  <span class="settings-desc">Single client sidebar or multi-account compact list (MAC).</span>
                 </div>
                 <select id="setting-account-layout-mode" class="settings-select account-layout-mode-select" aria-label="Account layout">
                   <option value="single">Single</option>
                   <option value="mac">MAC</option>
-                  <option value="multibox">Multibox</option>
                 </select>
               </div>
             </div>

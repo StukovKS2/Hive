@@ -9,6 +9,8 @@ import {
   type TrackedObject,
   type TrackedTile,
 } from 'headless-client';
+import type { GameDataLoader } from '../game-data/GameDataLoader.js';
+import { HeadlessDamageTracker, type HeadlessDamageSnapshot } from './HeadlessDamageTracker.js';
 
 export interface FleetAccount {
   id: string;
@@ -37,6 +39,7 @@ export interface HeadlessSessionSummary {
 
 export interface HeadlessFleetEvents {
   changed: [sessions: HeadlessSessionSummary[]];
+  damage: [accountId: string, snapshot: HeadlessDamageSnapshot];
 }
 
 interface FleetEntry {
@@ -45,12 +48,17 @@ interface FleetEntry {
   serverName: string;
   stopping: boolean;
   connectedAt: number;
+  damage: HeadlessDamageTracker;
 }
 
 export class HeadlessFleet extends EventEmitter {
   private readonly entries = new Map<string, FleetEntry>();
   private readonly pending = new Map<string, Promise<Client>>();
   private changedTimer: NodeJS.Timeout | undefined;
+
+  constructor(private readonly gameData: GameDataLoader) {
+    super();
+  }
 
   override on<E extends keyof HeadlessFleetEvents>(event: E, listener: (...args: HeadlessFleetEvents[E]) => void): this;
   override on(event: string | symbol, listener: (...args: any[]) => void): this {
@@ -130,6 +138,11 @@ export class HeadlessFleet extends EventEmitter {
     return this.get(accountId)?.visibleTiles() ?? [];
   }
 
+  damage(accountId?: string | null): HeadlessDamageSnapshot | null {
+    const entry = accountId ? this.entries.get(String(accountId)) : this.entries.values().next().value;
+    return entry?.damage.snapshot() ?? null;
+  }
+
   private async createClient(account: FleetAccount): Promise<Client> {
     const authAccount: Account = {
       guid: account.email,
@@ -153,8 +166,10 @@ export class HeadlessFleet extends EventEmitter {
       createClassType: resolveClassType(),
       refreshCredentials: () => login(authAccount),
     });
-    const entry: FleetEntry = { account, client, serverName: server.name, stopping: false, connectedAt: Date.now() };
+    const damage = new HeadlessDamageTracker(client, this.gameData);
+    const entry: FleetEntry = { account, client, serverName: server.name, stopping: false, connectedAt: Date.now(), damage };
     this.entries.set(account.id, entry);
+    damage.on('changed', (snapshot: HeadlessDamageSnapshot) => this.emit('damage', account.id, snapshot));
 
     const changed = () => this.scheduleChanged();
     client.on(ClientEvent.Connected, changed);

@@ -147,7 +147,7 @@ async function main() {
 
   // Plugins removed — stub keeps DevServer APIs compiling.
   const pluginManager = new PluginManager(proxy);
-  const headlessFleet = new HeadlessFleet();
+  const headlessFleet = new HeadlessFleet(gameData);
 
   let devServer: DevServer | undefined;
   let scriptHost: ScriptHost | undefined;
