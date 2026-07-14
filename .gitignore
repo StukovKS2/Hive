@@ -29,3 +29,6 @@ Manager/data/spritesheet.xml
 
 # Preserved histories from repositories imported into this monorepo
 **/.git.upstream/
+
+# Local Hive AIO panel captures
+hive-aio-panel.png
