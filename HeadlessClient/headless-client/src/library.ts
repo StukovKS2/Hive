@@ -6,6 +6,8 @@ export type {
   ClientShotFiredEvent,
   ContainerSlotRef,
   ItemContainer,
+  NavigationState,
+  NavigationStatus,
   PacketContext,
   PacketTraffic,
   ViewerAoeSnapshot,

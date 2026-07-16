@@ -205,7 +205,7 @@ export const DODGE_COST_WEIGHTS: Readonly<DodgeCostWeights> = Object.freeze({
   basePerSecond: 0.05,
   // Squared proximity exposure inside the 0.9-tile band beyond collision.
   projectileRiskPerSecond: 12,
-  // Squared exposure between the 1.3-tile hard and 2.3-tile soft enemy radii.
+  // Squared exposure between the 1.0-tile hard and 2.3-tile soft enemy radii.
   enemyRiskPerSecond: 3.5,
   // XML floor damage converted to cost per second while safe-walk is enabled.
   damagingFloorPerDamageSecond: 0.02,
@@ -1686,11 +1686,23 @@ function createCollisionQuery(
   resolution: number,
   safeWalk: boolean,
 ): CollisionQuery {
+  const startTileX = Math.floor(center.x);
+  const startTileY = Math.floor(center.y);
+  const isStartingTile = (x: number, y: number): boolean =>
+    Math.floor(x) === startTileX && Math.floor(y) === startTileY;
   const snapshot = environment.createLocalSnapshot?.(center, radius, resolution);
   if (!snapshot) {
+    const rawBlocked = (x: number, y: number): boolean =>
+      !environment.canOccupy(x, y, safeWalk, false);
+    const allowStartingTile = rawBlocked(center.x, center.y)
+      && hasOpenNeighbor(startTileX, startTileY, rawBlocked);
     return {
       resolution,
-      blocked: (x, y) => !environment.canOccupy(x, y, safeWalk, false),
+      // The authoritative player position can already overlap an OccupySquare
+      // object. Match global pathfinding's start-cell exemption so the local
+      // planner can leave that cell, while still rejecting every other block.
+      blocked: (x, y) => rawBlocked(x, y)
+        && !(allowStartingTile && isStartingTile(x, y)),
       damagingFloor: () => 0,
       enemyDistance: (x, y) => environment.enemyClearance?.(x, y) ?? Infinity,
     };
@@ -1701,11 +1713,18 @@ function createCollisionQuery(
     if (column < 0 || row < 0 || column >= snapshot.width || row >= snapshot.height) return -1;
     return row * snapshot.width + column;
   };
+  const startIndex = indexAt(center.x, center.y);
+  const startBlocked = startIndex < 0 || snapshot.blocked[startIndex] !== 0;
+  const rawBlocked = (x: number, y: number): boolean => {
+    const index = indexAt(x, y);
+    return index < 0 || snapshot.blocked[index] !== 0;
+  };
+  const allowStartingTile = startBlocked
+    && hasOpenNeighbor(startTileX, startTileY, rawBlocked);
   return {
     resolution: snapshot.resolution,
     blocked: (x, y) => {
-      const index = indexAt(x, y);
-      return index < 0 || snapshot.blocked[index] !== 0;
+      return rawBlocked(x, y) && !(allowStartingTile && isStartingTile(x, y));
     },
     damagingFloor: (x, y) => {
       const index = indexAt(x, y);
@@ -1716,6 +1735,20 @@ function createCollisionQuery(
       return index < 0 ? 0 : snapshot.enemyDistance[index] ?? Infinity;
     },
   };
+}
+
+function hasOpenNeighbor(
+  tileX: number,
+  tileY: number,
+  blocked: (x: number, y: number) => boolean,
+): boolean {
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      if (!blocked(tileX + dx + 0.5, tileY + dy + 0.5)) return true;
+    }
+  }
+  return false;
 }
 
 function createFixedControls(): MovementControl[] {

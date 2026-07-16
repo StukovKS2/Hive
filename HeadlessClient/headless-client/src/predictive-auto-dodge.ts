@@ -408,8 +408,12 @@ export class PredictiveAutoDodgeController {
         this.committed.result.trajectory,
         snapshot.time,
       );
-      drifted = Math.hypot(expected.x - snapshot.position.x, expected.y - snapshot.position.y)
-        > TRAJECTORY_DRIFT_TOLERANCE;
+      // A controlled-stop fallback has no moving trajectory to drift from. Its
+      // start position can differ from a later authoritative position without
+      // making the unchanged collision snapshot worth searching every frame.
+      drifted = this.committed.result.fallback !== 'stop'
+        && Math.hypot(expected.x - snapshot.position.x, expected.y - snapshot.position.y)
+          > TRAJECTORY_DRIFT_TOLERANCE;
       if (dangerChanged || environmentChanged || drifted) {
         const assessment = this.planner.assessTrajectory(input, this.committed.result.trajectory);
         currentUnsafe = !assessment.safe;
@@ -428,8 +432,14 @@ export class PredictiveAutoDodgeController {
     const urgentDue = snapshot.time - this.lastUrgentPlanAt >= URGENT_REPLAN_INTERVAL_MS;
     const normalDue = snapshot.time - this.lastPlanAt >= NORMAL_REPLAN_INTERVAL_MS;
     if (!this.committed) {
-      replanReason = projectiles.length > 0 || snapshot.aoes.length > 0 ? 'urgent' : 'normal';
-      replanCause = 'initial';
+      // A blocked local collision snapshot can legitimately produce no committed
+      // trajectory. Do not search again on every local frame while that snapshot
+      // is unchanged; doing so turns a controlled stop into a tight planner loop.
+      const hasDanger = projectiles.length > 0 || snapshot.aoes.length > 0;
+      if (hasDanger ? urgentDue : normalDue) {
+        replanReason = hasDanger ? 'urgent' : 'normal';
+        replanCause = 'initial';
+      }
     } else if (currentUnsafe) {
       replanReason = urgentDue ? 'urgent' : null;
       if (replanReason) replanCause = dangerChanged ? 'new_threat' : 'unsafe';
@@ -442,7 +452,8 @@ export class PredictiveAutoDodgeController {
     } else if (routeChanged) {
       replanReason = 'normal';
       replanCause = 'route_changed';
-    } else if (remainingMs <= MINIMUM_REMAINING_HORIZON_MS) {
+    } else if (this.committed.result.fallback !== 'stop'
+      && remainingMs <= MINIMUM_REMAINING_HORIZON_MS) {
       replanReason = 'normal';
       replanCause = 'expired';
     } else if (normalDue) {

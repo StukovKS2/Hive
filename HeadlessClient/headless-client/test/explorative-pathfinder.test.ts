@@ -431,7 +431,7 @@ test('Client combined navigation enables dodge and never gives it a goal farther
     targetId: 0,
     targetX: 20.5,
     targetY: 0.5,
-    hardMinimumRange: 1.3,
+    hardMinimumRange: 1,
     preferredMinimumRange: 2.5,
     preferredMaximumRange: 3.5,
   });
@@ -538,6 +538,65 @@ test('repeated script refreshes still allow an authoritative stall to replan', (
   assert.equal(replanned.replanned, true);
   assert.equal(hasTile(state.pathfinder, 1, 1), false);
   assert.ok(state.pathfinder.getPlannedTiles().some((tile) => tile.y !== 1));
+});
+
+test('Client exposes no-path state, suspends goal dodge, and recovers after map knowledge changes', () => {
+  const BLOCKED = 99;
+  const client = new Client({
+    alias: 'navigation-state-test',
+    accessToken: '',
+    clientToken: '',
+    charId: 1,
+    needsNewChar: false,
+    host: 'localhost',
+    combatData: {
+      getObject: () => undefined,
+      getProjectile: () => undefined,
+      tileIsBlockingWalk: (type) => type === BLOCKED,
+    },
+  });
+  const state = client as unknown as {
+    pos: { x: number; y: number };
+    serverPos: { x: number; y: number };
+    player: { spd: number; spdBoost: number; condition: number; condition2: number };
+    pathfinder: ExplorativePathfinder;
+    updateTarget(dt: number, integrateFromLocal?: boolean, now?: number): void;
+  };
+  const start = { x: 0.5, y: 2.5 };
+  const target = { x: 6.5, y: 2.5 };
+  Object.assign(state, {
+    pos: { ...start },
+    serverPos: { ...start },
+    player: { spd: 75, spdBoost: 0, condition: 0, condition2: 0 },
+  });
+  state.pathfinder.setMapBounds(7, 5);
+  for (let y = 0; y < 5; y++) state.pathfinder.observeTile(3, y, BLOCKED);
+
+  assert.equal(client.navigateTo(target), true);
+  state.updateTarget(16, false, 1000);
+
+  assert.deepEqual(client.getNavigationState(), {
+    status: 'no_path',
+    target: { ...target, threshold: 0.5 },
+    path: [],
+    dodgeDecision: 'idle',
+  });
+  assert.equal(client.isMoving(), false);
+  assert.equal(client.getDodgeMovementIntent(), null);
+  assert.deepEqual(state.pos, start);
+  assert.equal(client.navigateTo(target), false, 'cached no-path requests must remain rejected');
+
+  state.pathfinder.observeTile(3, 2, 0);
+  state.updateTarget(16, false, 1100);
+
+  assert.equal(client.getNavigationState().status, 'moving');
+  assert.equal(client.isMoving(), true);
+  assert.deepEqual(client.getDodgeMovementIntent(), {
+    mode: 'goal',
+    goalX: target.x,
+    goalY: target.y,
+    arriveThreshold: 0.5,
+  });
 });
 
 function createPathfinder(width: number, height: number): ExplorativePathfinder {

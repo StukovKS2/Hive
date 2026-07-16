@@ -97,6 +97,11 @@ export class BridgeWalking {
       return false;
     };
 
+    Walking.getNavigationState = () => {
+      warnUnimplemented('Walking.getNavigationState');
+      return { status: 'idle', target: null, path: [], dodgeDecision: null };
+    };
+
     Walking.hasReached = (_position: Position, _tolerance = 0.5) => {
       warnUnimplemented('Walking.hasReached');
       return false;

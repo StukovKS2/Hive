@@ -156,8 +156,8 @@ test('retreat pressure scales only the combat too-far preference', () => {
   assert.ok(relaxed.trajectory.waypoints.every((waypoint) => waypoint.speed === 0));
 });
 
-test('combat hard range clamps to 1.3 and starting inside can only escape', () => {
-  const target = { x: 6.2, y: 5 };
+test('combat hard range clamps to 1.0 and starting inside can only escape', () => {
+  const target = { x: 5.8, y: 5 };
   const result = plan(planningInput({
     goal: undefined,
     intent: combatIntent({
@@ -173,7 +173,7 @@ test('combat hard range clamps to 1.3 and starting inside can only escape', () =
     Math.hypot(waypoint.x - target.x, waypoint.y - target.y)
   ));
 
-  assert.ok(distances[0]! >= 1.2 - 1e-6);
+  assert.ok(distances[0]! >= 0.8 - 1e-6);
   assert.ok(distances.every((value, index) => index === 0 || value + 1e-6 >= distances[index - 1]!));
   assert.ok(distances.at(-1)! >= ENEMY_AVOID_RADIUS);
 });

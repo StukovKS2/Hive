@@ -12,7 +12,7 @@ interface DodgeObjectRecord {
 
 const INVALID_TILE_TYPE = 0xffff;
 /** Hard movement exclusion around confirmed projectile-capable combat enemies, in tiles. */
-export const ENEMY_AVOID_RADIUS = 1.3;
+export const ENEMY_AVOID_RADIUS = 1.0;
 /** Outer edge of the nonlinear enemy-proximity cost, in tiles. */
 export const ENEMY_SOFT_AVOID_RADIUS = 2.3;
 const DISTANCE_EPSILON = 1e-9;

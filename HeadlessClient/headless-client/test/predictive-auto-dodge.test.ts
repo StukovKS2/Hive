@@ -691,6 +691,64 @@ test('goal-owned dodge stops instead of bypassing local collision when no route 
   assert.deepEqual(state.velocity, { x: 0, y: 0 });
 });
 
+test('goal-blocked dodge throttles repeated searches while the collision snapshot is unchanged', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true);
+  const snapshot = (time: number) => ({
+    time,
+    playerId: 10,
+    position: { x: 5, y: 5 },
+    goal: { x: 8, y: 5, threshold: 0.1 },
+    moveSpeed: 0.004,
+    intentVelocity: { x: 0.004, y: 0 },
+    movementLeadMs: 16,
+    projectiles: [],
+    aoes: [],
+    environment: {
+      canOccupy: () => false,
+      isProjectileSegmentOpen: () => true,
+    },
+  });
+
+  let state = controller.evaluate(snapshot(0));
+  assert.equal(state.decision, 'goal_blocked');
+  assert.equal(state.plannerMetrics.totalPlans, 1);
+
+  for (const time of [16, 32, 64, 99]) state = controller.evaluate(snapshot(time));
+  assert.equal(state.decision, 'goal_blocked');
+  assert.equal(state.plannerMetrics.totalPlans, 1);
+  assert.equal(state.searchPerformed, false);
+
+  state = controller.evaluate(snapshot(100));
+  assert.equal(state.decision, 'goal_blocked');
+  assert.equal(state.plannerMetrics.totalPlans, 2);
+  assert.equal(state.searchPerformed, true);
+});
+
+test('goal-owned dodge can leave an occupied starting tile accepted by global pathfinding', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true);
+  const state = controller.evaluate({
+    time: 0,
+    playerId: 10,
+    position: { x: 5.2, y: 5.5 },
+    goal: { x: 7.5, y: 5.5, threshold: 0.1 },
+    moveSpeed: 0.004,
+    intentVelocity: { x: 0.004, y: 0 },
+    movementLeadMs: 16,
+    projectiles: [],
+    aoes: [],
+    environment: {
+      canOccupy: (x, y) => Math.floor(x) !== 5 || Math.floor(y) !== 5,
+      isProjectileSegmentOpen: () => true,
+    },
+  });
+
+  assert.equal(state.decision, 'goal_path');
+  assert.ok(state.velocity.x > 0, `expected egress toward the route, got ${state.velocity.x}`);
+  assert.equal(state.velocity.y, 0);
+});
+
 test('goal-aware auto-dodge takes a lateral detour and resumes toward the waypoint', () => {
   const controller = new PredictiveAutoDodgeController();
   controller.setEnabled(true);

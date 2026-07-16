@@ -151,6 +151,15 @@ export interface ViewerAoeSnapshot {
   landingTime?: number;
 }
 
+export type NavigationStatus = 'idle' | 'planning' | 'moving' | 'no_path' | 'dodge_blocked';
+
+export interface NavigationState {
+  status: NavigationStatus;
+  target: { x: number; y: number; threshold: number } | null;
+  path: Array<{ x: number; y: number }>;
+  dodgeDecision: string | null;
+}
+
 const VIEWER_AOE_LIFETIME_MS = 750;
 const MAX_VIEWER_AOES = 256;
 
@@ -297,6 +306,10 @@ export class Client extends EventEmitter {
   private readonly dodgeWorld: DodgeCollisionWorld | undefined;
   private readonly autoDodge: PredictiveAutoDodgeController | undefined;
   private dodgeMovementIntent: DodgeMovementIntent | null = null;
+  private suspendedDodgeMovementIntent: DodgeMovementIntent | null = null;
+  private navigationStatus: NavigationStatus = 'idle';
+  private navigationRequestKey = '';
+  private navigationDodgeDecision: string | null = null;
   private readonly dodgeJumpLimiter = new DodgeJumpLimiter();
   private readonly thrownAoes: ThrownAoeTracker | undefined;
   private readonly portalTracker = new PortalTracker();
@@ -581,6 +594,11 @@ export class Client extends EventEmitter {
       return false;
     }
     this.pathfinder.clearTarget();
+    this.dodgeMovementIntent = null;
+    this.suspendedDodgeMovementIntent = null;
+    this.navigationRequestKey = `direct:${target.x}:${target.y}:${arriveThreshold}`;
+    this.navigationStatus = 'moving';
+    this.navigationDodgeDecision = null;
     this.movement.setTarget(target, arriveThreshold);
     return true;
   }
@@ -592,13 +610,20 @@ export class Client extends EventEmitter {
     goalId?: DodgeMovementIntentId,
   ): boolean {
     const wasPathfinding = this.pathfinder.hasTarget();
+    const requestKey = `goal:${target.x}:${target.y}:${arriveThreshold}:${String(goalId ?? '')}`;
+    const sameRequest = wasPathfinding && this.navigationRequestKey === requestKey;
     if (!this.pathfinder.setTarget(target, arriveThreshold, goalId)) {
       return false;
+    }
+    this.navigationRequestKey = requestKey;
+    if (!sameRequest || this.navigationStatus === 'idle') {
+      this.navigationStatus = 'planning';
+      this.navigationDodgeDecision = null;
     }
     // Script loops commonly refresh the same target. Preserve the active
     // waypoint so its authoritative stall timer can still trigger recovery.
     if (!wasPathfinding) this.movement.clear();
-    return true;
+    return this.navigationStatus !== 'no_path';
   }
 
   /** Enables dodge ownership and starts exploratory pathfinding to one world coordinate. */
@@ -608,6 +633,7 @@ export class Client extends EventEmitter {
     options: AutoDodgeOptions & { goalId?: DodgeMovementIntentId } = {},
   ): boolean {
     if (!this.autoDodge || !this.pathfindingWalkTo(target, arriveThreshold, options.goalId)) return false;
+    this.suspendedDodgeMovementIntent = null;
     this.setDodgeMovementIntent({
       mode: 'goal',
       goalX: target.x,
@@ -626,9 +652,17 @@ export class Client extends EventEmitter {
     targetId = 0,
   ): boolean {
     const wasPathfinding = this.pathfinder.hasTarget();
+    const requestKey = `combat:${target.x}:${target.y}:${range.minimumDistance}:` +
+      `${range.preferredDistance}:${range.maximumDistance}:${targetId}`;
+    const sameRequest = wasPathfinding && this.navigationRequestKey === requestKey;
     if (!this.pathfinder.setCombatTarget(target, range, targetId)) return false;
+    this.navigationRequestKey = requestKey;
+    if (!sameRequest || this.navigationStatus === 'idle') {
+      this.navigationStatus = 'planning';
+      this.navigationDodgeDecision = null;
+    }
     if (!wasPathfinding) this.movement.clear();
-    return true;
+    return this.navigationStatus !== 'no_path';
   }
 
   /** Enables dodge ownership and maintains a reachable firing band around a combat target. */
@@ -655,6 +689,7 @@ export class Client extends EventEmitter {
       || preferredMinimumRange > preferredMaximumRange) return false;
     if (!this.autoDodge
       || !this.combatPathfindingWalkTo(target, range, options.targetId ?? 0)) return false;
+    this.suspendedDodgeMovementIntent = null;
     this.setDodgeMovementIntent({
       mode: 'combat_range',
       targetId: options.targetId ?? 0,
@@ -672,14 +707,31 @@ export class Client extends EventEmitter {
     this.pathfinder.clearTarget();
     this.movement.clear();
     this.dodgeMovementIntent = null;
+    this.suspendedDodgeMovementIntent = null;
+    this.navigationStatus = 'idle';
+    this.navigationRequestKey = '';
+    this.navigationDodgeDecision = null;
   }
 
   isMoving(): boolean {
+    if (this.navigationStatus === 'no_path' || this.navigationStatus === 'dodge_blocked') {
+      return false;
+    }
     return this.pathfinder.hasTarget() || this.movement.hasTarget();
   }
 
   getNavigationPath(): Array<{ x: number; y: number }> {
     return this.pathfinder.getRemainingPath();
+  }
+
+  getNavigationState(): NavigationState {
+    const target = this.pathfinder.getTarget() ?? this.movement.getTarget();
+    return {
+      status: this.navigationStatus,
+      target: target ? { ...target } : null,
+      path: this.getNavigationPath(),
+      dodgeDecision: this.navigationDodgeDecision,
+    };
   }
 
   /** Enables ProdMafia-style predictive projectile and thrown-AOE dodging. */
@@ -704,11 +756,13 @@ export class Client extends EventEmitter {
   setDodgeMovementIntent(intent: DodgeMovementIntent | null): boolean {
     if (intent === null) {
       this.dodgeMovementIntent = null;
+      this.suspendedDodgeMovementIntent = null;
       return true;
     }
     const normalized = normalizeDodgeMovementIntent(intent);
     if (!normalized) return false;
     this.dodgeMovementIntent = normalized;
+    this.suspendedDodgeMovementIntent = null;
     return true;
   }
 
@@ -2507,6 +2561,12 @@ export class Client extends EventEmitter {
     this.objects.clear();
     this.tiles.clear();
     this.pathfinder.resetMap();
+    this.movement.clear();
+    this.dodgeMovementIntent = null;
+    this.suspendedDodgeMovementIntent = null;
+    this.navigationStatus = 'idle';
+    this.navigationRequestKey = '';
+    this.navigationDodgeDecision = null;
     this.dodgeWorld?.reset();
     this.autoDodge?.reset();
     this.dodgeJumpLimiter.resetMap(this.time());
@@ -3254,13 +3314,18 @@ export class Client extends EventEmitter {
 
   /** Advances navigation intent, with predictive dodge optionally replacing only its velocity. */
   private updateTarget(dt: number, integrateFromLocal = false, now = this.time()): void {
-    const selectedCombatTargetId = this.dodgeMovementIntent?.mode === 'combat_range'
-      ? this.dodgeMovementIntent.targetId
+    const selectedIntent = this.dodgeMovementIntent ?? this.suspendedDodgeMovementIntent;
+    const selectedCombatTargetId = selectedIntent?.mode === 'combat_range'
+      ? selectedIntent.targetId
       : 0;
     if (selectedCombatTargetId > 0 && !this.objects.has(selectedCombatTargetId)) {
       this.pathfinder.clearTarget();
       this.movement.clear();
       this.dodgeMovementIntent = null;
+      this.suspendedDodgeMovementIntent = null;
+      this.navigationStatus = 'idle';
+      this.navigationRequestKey = '';
+      this.navigationDodgeDecision = null;
     }
     const usingPathfinding = this.pathfinder.hasTarget();
     if (usingPathfinding) {
@@ -3269,10 +3334,24 @@ export class Client extends EventEmitter {
       if (navigation.reached) {
         this.movement.clear();
         this.dodgeMovementIntent = null;
+        this.suspendedDodgeMovementIntent = null;
+        this.navigationStatus = 'idle';
+        this.navigationRequestKey = '';
+        this.navigationDodgeDecision = null;
         console.log(`${this.tag} reached move target`);
         this.emit(ClientEvent.ReachedTarget, navigation.reached);
       } else if (!navigation.waypoint || navigation.waypointThreshold === undefined) {
         this.movement.clear();
+        if (navigation.noPath) {
+          this.navigationStatus = 'no_path';
+          this.navigationDodgeDecision = null;
+          if (this.dodgeMovementIntent) {
+            this.suspendedDodgeMovementIntent = cloneDodgeMovementIntent(this.dodgeMovementIntent);
+            this.dodgeMovementIntent = null;
+          }
+        } else if (this.navigationStatus !== 'no_path') {
+          this.navigationStatus = 'planning';
+        }
         if (navigation.noPath && navigation.replanned) {
           const target = this.pathfinder.getTarget();
           console.warn(
@@ -3280,6 +3359,11 @@ export class Client extends EventEmitter {
           );
         }
       } else {
+        this.navigationStatus = 'moving';
+        if (!this.dodgeMovementIntent && this.suspendedDodgeMovementIntent) {
+          this.dodgeMovementIntent = cloneDodgeMovementIntent(this.suspendedDodgeMovementIntent);
+          this.suspendedDodgeMovementIntent = null;
+        }
         const activeWaypoint = this.movement.getTarget();
         if (!activeWaypoint
           || activeWaypoint.x !== navigation.waypoint.x
@@ -3334,6 +3418,12 @@ export class Client extends EventEmitter {
           environment: this.dodgeWorld,
         })
       : undefined;
+    this.navigationDodgeDecision = dodgeState?.decision ?? null;
+    if (this.pathfinder.hasTarget() && this.navigationStatus !== 'no_path') {
+      this.navigationStatus = dodgeState?.decision.endsWith('_blocked')
+        ? 'dodge_blocked'
+        : this.movement.hasTarget() ? 'moving' : 'planning';
+    }
     const jumpTarget = dodgeState?.jumpTarget ?? undefined;
     const jumpCommitted = jumpTarget
       ? this.dodgeJumpLimiter.commit(now, this.pos, jumpTarget)
@@ -3353,8 +3443,10 @@ export class Client extends EventEmitter {
       integrateFromLocal,
       positionOverride,
       velocityOverride,
+      // A goal_blocked dodge decision intentionally commands a controlled stop.
+      // Treating that stop as failed server movement poisons both pathfinding and
+      // dodge collision with learned blocked cells, making the condition persist.
       trackTargetProgress: dodgeState?.decision === 'follow_goal'
-        || dodgeState?.decision === 'goal_blocked'
         || dodgeState?.decision === 'goal_path' && dodgeState.threatCount === 0,
     });
     this.pos = update.pos;
@@ -3363,9 +3455,11 @@ export class Client extends EventEmitter {
         const blocked = this.pathfinder.reportStall(this.serverPos);
         if (blocked) this.dodgeWorld?.markBlocked(blocked.x, blocked.y);
         this.movement.clear();
+        this.navigationStatus = 'planning';
         console.warn(
-          `${this.tag} movement stalled ${update.stalled.distance.toFixed(1)} tiles from waypoint at ` +
-            `(${this.serverPos.x.toFixed(2)},${this.serverPos.y.toFixed(2)}); marking the next tile blocked and replanning`,
+          `${this.tag} movement stalled ${update.stalled.distance.toFixed(1)} tiles from its target; ` +
+            `server position (${this.serverPos.x.toFixed(2)},${this.serverPos.y.toFixed(2)}); ` +
+            `marking the next route tile blocked and replanning`,
         );
       } else {
         console.warn(
@@ -3375,6 +3469,9 @@ export class Client extends EventEmitter {
       }
     }
     if (update.reached && !usingPathfinding) {
+      this.navigationStatus = 'idle';
+      this.navigationRequestKey = '';
+      this.navigationDodgeDecision = null;
       console.log(`${this.tag} reached move target`);
       this.emit(ClientEvent.ReachedTarget, update.reached);
     }

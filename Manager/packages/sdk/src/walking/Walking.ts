@@ -100,6 +100,15 @@ export interface NavigationOptions extends AutoDodgeOptions {
     goalId?: DodgeMovementIntentId;
 }
 
+export type NavigationStatus = 'idle' | 'planning' | 'moving' | 'no_path' | 'dodge_blocked';
+
+export interface NavigationState {
+    status: NavigationStatus;
+    target: { x: number; y: number; threshold: number } | null;
+    path: Array<{ x: number; y: number }>;
+    dodgeDecision: string | null;
+}
+
 export interface CombatPathfindingOptions {
     /** Stable runtime identity of the selected combat target. */
     targetId?: number;
@@ -109,7 +118,7 @@ export interface CombatPathfindingOptions {
     preferredRangeRatio?: number;
     /** @deprecated Use `hardMinimumRange`. Retained for existing scripts. */
     minimumEnemyDistance?: number;
-    /** Hard selected-enemy exclusion floor. Clamped to the canonical 1.3 tiles. */
+    /** Hard selected-enemy exclusion floor. Clamped to the canonical 1.0 tile. */
     hardMinimumRange?: number;
     /** Lower edge of the preferred firing band. */
     preferredMinimumRange?: number;
@@ -262,6 +271,11 @@ export class Walking {
     }
 
     static isMoving(): boolean {
+        throw new Error('Must be run inside Hive client');
+    }
+
+    /** Current global-pathfinding and local-dodge execution state. */
+    static getNavigationState(): NavigationState {
         throw new Error('Must be run inside Hive client');
     }
 

@@ -611,6 +611,12 @@ export function installHeadlessBridge(deps: BridgeDeps): void {
     client.stopMoving();
   };
   Walking.isMoving = () => optional(deps)?.isMoving() ?? false;
+  Walking.getNavigationState = () => optional(deps)?.getNavigationState() ?? {
+    status: 'idle',
+    target: null,
+    path: [],
+    dodgeDecision: null,
+  };
   Walking.hasReached = (position: Position, tolerance = 0.5) => (optional(deps)?.distanceTo(position) ?? Infinity) <= tolerance;
   Walking.enableAutoDodge = (options = {}) => active(deps).enableAutoDodge(options);
   Walking.disableAutoDodge = () => active(deps).disableAutoDodge();

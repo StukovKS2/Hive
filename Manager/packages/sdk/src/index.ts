@@ -124,6 +124,8 @@ export type {
   DodgeSafetyState,
   GoalDodgeIntent,
   NavigationOptions,
+  NavigationState,
+  NavigationStatus,
   TeleportBeaconDestination,
 } from './walking/Walking';
 export { Combat } from './combat/Combat';

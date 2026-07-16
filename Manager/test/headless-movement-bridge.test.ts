@@ -14,6 +14,12 @@ test('combat navigation forwards a canonical weapon-derived dodge range', () => 
   const client = {
     getInventory: () => [100],
     getPlayer: () => ({ projSpeedMult: 1.2, projLifeMult: 1.25 }),
+    getNavigationState: () => ({
+      status: 'no_path' as const,
+      target: { x: 20, y: 5, threshold: 1 },
+      path: [],
+      dodgeDecision: null,
+    }),
     navigateToCombatTarget: (
       target: { x: number; y: number },
       range: CombatPathfindingRange,
@@ -46,7 +52,13 @@ test('combat navigation forwards a canonical weapon-derived dodge range', () => 
     maximumDistance: 8,
   });
   assert.equal(captured?.options.targetId, 42);
-  assert.equal(captured?.options.hardMinimumRange, 1.3);
+  assert.equal(captured?.options.hardMinimumRange, 1);
   assert.equal(captured?.options.preferredMinimumRange, 4);
   assert.equal(captured?.options.preferredMaximumRange, 8);
+  assert.deepEqual(Walking.getNavigationState(), {
+    status: 'no_path',
+    target: { x: 20, y: 5, threshold: 1 },
+    path: [],
+    dodgeDecision: null,
+  });
 });

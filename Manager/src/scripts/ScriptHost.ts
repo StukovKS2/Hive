@@ -1,4 +1,13 @@
-import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from 'fs';
 import { homedir } from 'os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'path';
 import { pathToFileURL } from 'url';
@@ -62,6 +71,7 @@ interface RunningScript {
   timer: NodeJS.Timeout;
   startedAt: number;
   accountId?: string;
+  runtimeRoot?: string;
 }
 
 const SCRIPT_MANIFEST = 'hive.script.json';
@@ -173,6 +183,36 @@ export class ScriptHost {
   private runtimeKey(scriptId: string, accountId?: string): string {
     const account = String(accountId ?? '').trim();
     return account ? `${scriptId}\u0000${account}` : scriptId;
+  }
+
+  /**
+   * Loads local scripts from a unique directory so Node cannot reuse any
+   * statically imported child module from an earlier run.
+   */
+  private createRuntimeCopy(script: ScriptInfo): { entryPath: string; runtimeRoot: string } {
+    const runtimeBase = join(dirname(this.scriptsDir), 'ScriptRuntime');
+    mkdirSync(runtimeBase, { recursive: true });
+    const runtimeRoot = mkdtempSync(join(runtimeBase, `${script.id}-`));
+    const packageRoot = join(runtimeRoot, 'package');
+    cpSync(script.rootPath, packageRoot, {
+      recursive: true,
+      filter: (source) => {
+        const rel = relative(script.rootPath, source);
+        if (!rel) return true;
+        const topLevel = rel.split(/[\\/]/, 1)[0];
+        return topLevel !== 'node_modules' && topLevel !== '.git';
+      },
+    });
+    return { entryPath: resolve(packageRoot, script.entry), runtimeRoot };
+  }
+
+  private removeRuntimeCopy(runtimeRoot: string | undefined): void {
+    if (!runtimeRoot) return;
+    try {
+      rmSync(runtimeRoot, { recursive: true, force: true });
+    } catch {
+      /* runtime cleanup must not prevent script lifecycle completion */
+    }
   }
 
   private runsForScript(scriptId: string): Array<{ key: string; entry: RunningScript }> {
@@ -340,9 +380,13 @@ export class ScriptHost {
     }
 
     this.starting.add(runKey);
+    let runtimeRoot: string | undefined;
+    let runtimeAdopted = false;
     try {
-      const fileUrl = pathToFileURL(script.path).href;
-      const mod = await import(`${fileUrl}?t=${Date.now()}`);
+      const runtime = this.createRuntimeCopy(script);
+      runtimeRoot = runtime.runtimeRoot;
+      const fileUrl = pathToFileURL(runtime.entryPath).href;
+      const mod = await import(fileUrl);
 
       const ScriptClass = mod.default;
       if (!ScriptClass) {
@@ -383,7 +427,14 @@ export class ScriptHost {
               return;
             }
             const timer = setTimeout(schedule, typeof delay === 'number' ? delay : 600);
-            this.running.set(runKey, { scriptId: id, instance, timer, startedAt, accountId });
+            this.running.set(runKey, {
+              scriptId: id,
+              instance,
+              timer,
+              startedAt,
+              accountId,
+              runtimeRoot,
+            });
           } catch (err: any) {
             this.log(id, `Error in onLoop: ${err.message}`, 'error');
             this.stop(id, accountId);
@@ -392,7 +443,15 @@ export class ScriptHost {
       };
 
       const timer = setTimeout(schedule, 0);
-      this.running.set(runKey, { scriptId: id, instance, timer, startedAt, accountId });
+      this.running.set(runKey, {
+        scriptId: id,
+        instance,
+        timer,
+        startedAt,
+        accountId,
+        runtimeRoot,
+      });
+      runtimeAdopted = true;
       this.withScriptId(id, () => this.log(id, `Running ${script.name} v${script.version} by ${script.developer}.`), accountId);
 
       this.emitScriptsStateChanged();
@@ -403,6 +462,7 @@ export class ScriptHost {
       return { ok: false, error: err.message };
     } finally {
       this.starting.delete(runKey);
+      if (!runtimeAdopted) this.removeRuntimeCopy(runtimeRoot);
     }
   }
 
@@ -428,6 +488,7 @@ export class ScriptHost {
         this.log(id, `Error in onStop: ${err.message}`, 'error');
       }
     }, entry.accountId);
+    this.removeRuntimeCopy(entry.runtimeRoot);
 
     this.scriptActivityByRun.delete(runKey);
     this.emitScriptsStateChanged();
