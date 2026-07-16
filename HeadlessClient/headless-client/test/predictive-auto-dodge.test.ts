@@ -94,6 +94,79 @@ test('a full-speed escape stops promptly after its danger has passed', () => {
   assert.ok(state.trajectory?.waypoints.some((waypoint) => waypoint.speed === 0));
 });
 
+test('combat retreat enters evasive state and recovers without an immediate reversal', () => {
+  const controller = new PredictiveAutoDodgeController({ maxStatesPerLayer: 64 });
+  controller.setEnabled(true);
+  const shot = {
+    ...hostileProjectile(),
+    startX: 6,
+    angle: Math.PI,
+    definition: { ...definition, lifetimeMs: 120 },
+  };
+  const movementIntent = {
+    mode: 'combat_range' as const,
+    targetId: 42,
+    targetX: 8,
+    targetY: 5,
+    hardMinimumRange: 1.3,
+    preferredMinimumRange: 2,
+    preferredMaximumRange: 3,
+  };
+  const base = {
+    playerId: 10,
+    goal: { x: 8, y: 5 },
+    movementIntent,
+    moveSpeed: 0.0096,
+    intentVelocity: { x: 0, y: 0 },
+    movementLeadMs: 0,
+    aoes: [],
+    environment: openEnvironment,
+  };
+  let position = { x: 5, y: 5 };
+  let state = controller.evaluate({ ...base, time: 0, position, projectiles: [shot] });
+  const initialScale = state.retreatPenaltyScale;
+  let maximumRange = 3;
+  let lastEvasiveVelocity = { ...state.velocity };
+  let firstRecoveryVelocity: { x: number; y: number } | null = null;
+  let recoveryScale = 0;
+
+  assert.equal(state.safetyState, 'evasive');
+  assert.ok(initialScale < 1);
+
+  for (let time = 20; time <= 500; time += 20) {
+    position = {
+      x: position.x + state.velocity.x * 20,
+      y: position.y + state.velocity.y * 20,
+    };
+    maximumRange = Math.max(maximumRange, Math.hypot(position.x - 8, position.y - 5));
+    state = controller.evaluate({
+      ...base,
+      time,
+      position,
+      projectiles: time < 120 ? [shot] : [],
+    });
+    if (state.safetyState === 'evasive') lastEvasiveVelocity = { ...state.velocity };
+    if (state.safetyState === 'recovering' && firstRecoveryVelocity === null) {
+      firstRecoveryVelocity = { ...state.velocity };
+      recoveryScale = state.retreatPenaltyScale;
+    }
+  }
+
+  assert.ok(maximumRange > movementIntent.preferredMaximumRange + 0.2);
+  assert.ok(recoveryScale < 1 && recoveryScale < initialScale);
+  assert.ok(firstRecoveryVelocity !== null);
+  assert.ok(
+    lastEvasiveVelocity.x * firstRecoveryVelocity.x
+      + lastEvasiveVelocity.y * firstRecoveryVelocity.y >= -1e-9,
+    'recovery immediately reversed the evasive command',
+  );
+  assert.equal(state.safetyState, 'normal');
+  assert.equal(state.retreatPenaltyScale, 1);
+  const finalRange = Math.hypot(position.x - 8, position.y - 5);
+  assert.ok(finalRange >= movementIntent.preferredMinimumRange - 0.1);
+  assert.ok(finalRange <= movementIntent.preferredMaximumRange + 0.1);
+});
+
 test('predictive auto-dodge uses an exact 0.5 projectile collision box', () => {
   const controller = new PredictiveAutoDodgeController();
   controller.setEnabled(true);

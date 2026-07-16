@@ -137,6 +137,25 @@ test('combat-range mode waits when already inside the preferred band', () => {
   assert.ok(result.trajectory.waypoints.every((waypoint) => waypoint.x === 5 && waypoint.y === 5));
 });
 
+test('retreat pressure scales only the combat too-far preference', () => {
+  const intent = combatIntent({ targetX: 9, preferredMinimumRange: 2, preferredMaximumRange: 3 });
+  const pressured = plan(planningInput({
+    intent,
+    goal: undefined,
+    intentVelocity: { x: 0, y: 0 },
+    retreatPenaltyScale: 1,
+  }));
+  const relaxed = plan(planningInput({
+    intent,
+    goal: undefined,
+    intentVelocity: { x: 0, y: 0 },
+    retreatPenaltyScale: 0,
+  }));
+
+  assert.ok(pressured.trajectory.waypoints[0]!.x > 5);
+  assert.ok(relaxed.trajectory.waypoints.every((waypoint) => waypoint.speed === 0));
+});
+
 test('combat hard range clamps to 1.3 and starting inside can only escape', () => {
   const target = { x: 6.2, y: 5 };
   const result = plan(planningInput({

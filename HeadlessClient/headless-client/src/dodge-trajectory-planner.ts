@@ -689,6 +689,11 @@ export class SpaceTimeDodgePlanner {
 
   private tryDirectTrajectory(context: PlannerContext): DodgePlanningResult | undefined {
     const { input } = context;
+    // During combat retreat/recovery, the direct shortcut cannot compare waiting
+    // against range correction. Let the layered search apply the scaled costs.
+    if (context.intent?.mode === 'combat_range' && context.retreatPenaltyScale < 1 - 1e-9) {
+      return undefined;
+    }
     let current = { ...input.position };
     let previousVelocity = input.previousVelocity ?? input.intentVelocity;
     let cumulativeCost = 0;
@@ -1204,13 +1209,15 @@ export class SpaceTimeDodgePlanner {
 
     cost += this.calculateIntentTransitionCost(context, from, velocity, durationMs, endMs);
     const desired = desiredDirectionAt(context, from, endMs - durationMs);
-    if (speed <= 1e-9 && desired) {
-      cost += this.weights.unnecessaryWaitPerSecond * durationSeconds;
-    } else if (speed > 1e-9 && !desired && context.input.moveSpeed > 1e-9) {
+    const desiredScale = desiredDirectionCostScaleAt(context, from, endMs - durationMs);
+    const desiredActive = !!desired && desiredScale > 1e-9;
+    if (speed <= 1e-9 && desiredActive) {
+      cost += this.weights.unnecessaryWaitPerSecond * durationSeconds * desiredScale;
+    } else if (speed > 1e-9 && !desiredActive && context.input.moveSpeed > 1e-9) {
       cost += this.weights.unnecessaryMotionPerSecond
         * durationSeconds * speed / context.input.moveSpeed;
     }
-    if (desired) {
+    if (desiredActive) {
       if (speed > 1e-9) {
         const alignment = clamp(
           (velocity.x * desired.x + velocity.y * desired.y) / speed,
@@ -1218,7 +1225,7 @@ export class SpaceTimeDodgePlanner {
           1,
         );
         cost += this.weights.pathIntentDeviationPerSecond
-          * durationSeconds * (1 - alignment) * 0.5;
+          * durationSeconds * (1 - alignment) * 0.5 * desiredScale;
       }
     }
     return cost;
@@ -1309,7 +1316,7 @@ export class SpaceTimeDodgePlanner {
       );
     }
     const terminalSpeed = Math.hypot(velocity.x, velocity.y);
-    if (!desiredDirectionAt(context, position, safeThroughMs)
+    if (desiredDirectionCostScaleAt(context, position, safeThroughMs) <= 1e-9
       && terminalSpeed > 1e-9 && context.input.moveSpeed > 1e-9) {
       cost += this.weights.terminalUnnecessarySpeed
         * Math.min(1, terminalSpeed / context.input.moveSpeed);
@@ -1897,6 +1904,23 @@ function desiredDirectionAt(
     return unitVector({ x: 0, y: 0 }, context.input.preferredDirection);
   }
   return unitVector({ x: 0, y: 0 }, context.input.intentVelocity);
+}
+
+function desiredDirectionCostScaleAt(
+  context: PlannerContext,
+  position: { x: number; y: number },
+  timeOffsetMs: number,
+): number {
+  const intent = context.intent;
+  if (intent?.mode !== 'combat_range') {
+    return desiredDirectionAt(context, position, timeOffsetMs) ? 1 : 0;
+  }
+  const target = context.combatTargetScratch;
+  writeCombatTargetAt(context, timeOffsetMs, target);
+  const targetDistance = distance(position, target);
+  if (targetDistance < intent.preferredMinimumRange) return 1;
+  if (targetDistance > intent.preferredMaximumRange) return context.retreatPenaltyScale;
+  return 0;
 }
 
 function reconstructTrajectory(

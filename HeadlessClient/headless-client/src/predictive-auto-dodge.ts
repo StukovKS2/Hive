@@ -41,6 +41,9 @@ export interface AutoDodgeAoeThreat extends DodgePlanningAoe {}
 
 export interface AutoDodgeEnvironment extends DodgePlanningEnvironment {}
 
+/** Internal trajectory-controller state; scripts select movement intent, not this state. */
+export type DodgeSafetyState = 'normal' | 'evasive' | 'recovering';
+
 export interface AutoDodgeSnapshot {
   time: number;
   playerId: number;
@@ -79,6 +82,9 @@ export interface AutoDodgeState {
   jumpStatus: DodgeJumpStatus | 'disabled';
   planRevision: number;
   planReused: boolean;
+  safetyState: DodgeSafetyState;
+  /** Scales only combat's soft too-far cost; hard safety remains fully enforced. */
+  retreatPenaltyScale: number;
   lastReplanAt: number | null;
   replanReason: DodgeReplanReason | null;
   dangerRevision: number;
@@ -111,6 +117,10 @@ const PLAN_SCORE_ABSOLUTE_GAIN = 0.35;
 const PLAN_SCORE_RELATIVE_GAIN = 0.08;
 const VELOCITY_MATCH_TOLERANCE = 1e-6;
 const JUMP_REJECTION_SUPPRESSION_MS = 80;
+const EVASIVE_IMPACT_WINDOW_MS = 500;
+const EVASIVE_RETREAT_RESPONSE_MS = 80;
+const EVASIVE_INITIAL_RESPONSE_MS = 20;
+const RECOVERY_RETREAT_RESPONSE_MS = 500;
 
 /**
  * Schedules perception, planning, trajectory hysteresis, and receding-horizon
@@ -136,6 +146,10 @@ export class PredictiveAutoDodgeController {
   private urgentReplanPending = false;
   private jumpSuppressedUntil = -Infinity;
   private lastCommandVelocity = { x: 0, y: 0 };
+  private safetyState: DodgeSafetyState = 'normal';
+  private retreatPenaltyScale = 1;
+  private dangerPressure = 0;
+  private lastSafetyUpdateAt: number | null = null;
   private state: AutoDodgeState;
 
   constructor(plannerOptions: DodgePlannerOptions = {}) {
@@ -177,6 +191,10 @@ export class PredictiveAutoDodgeController {
     this.urgentReplanPending = false;
     this.jumpSuppressedUntil = -Infinity;
     this.lastCommandVelocity = { x: 0, y: 0 };
+    this.safetyState = 'normal';
+    this.retreatPenaltyScale = 1;
+    this.dangerPressure = 0;
+    this.lastSafetyUpdateAt = null;
     this.state = emptyState(this.enabled, this.planner.getMetrics());
   }
 
@@ -246,6 +264,10 @@ export class PredictiveAutoDodgeController {
     const intentChanged = !sameMovementIntent(intent, this.committed?.intent ?? null, snapshot.position);
     const routeRevision = snapshot.routeRevision ?? 0;
     const routeChanged = !!this.committed && routeRevision !== this.committed.routeRevision;
+    this.advanceSafetyState(snapshot.time, intent, snapshot.position);
+    if (dangerChanged && projectiles.length === 0 && snapshot.aoes.length === 0) {
+      this.setDangerPressure(0, snapshot.time);
+    }
 
     if (snapshot.movementLocked || snapshot.moveSpeed <= 0) {
       if (this.committed) this.planner.recordTrajectoryInvalidation();
@@ -297,7 +319,7 @@ export class PredictiveAutoDodgeController {
       routeWaypoint: goal ?? undefined,
       preferredDirection: normalizedDirection(snapshot.intentVelocity),
       combatTargetPositionAt: snapshot.combatTargetPositionAt,
-      retreatPenaltyScale: 1,
+      retreatPenaltyScale: this.retreatPenaltyScale,
       moveSpeed: snapshot.moveSpeed,
       intentVelocity: { ...snapshot.intentVelocity },
       previousVelocity: this.committed
@@ -328,6 +350,10 @@ export class PredictiveAutoDodgeController {
         currentUnsafe = !assessment.safe;
         this.urgentReplanPending = currentUnsafe;
         remainingMs = assessment.remainingMs;
+        if (currentUnsafe) {
+          this.setDangerPressure(1, snapshot.time);
+          input.retreatPenaltyScale = this.retreatPenaltyScale;
+        }
         if (currentUnsafe || drifted) this.planner.recordTrajectoryInvalidation();
       }
     }
@@ -351,6 +377,13 @@ export class PredictiveAutoDodgeController {
     let jumpPlan: EmergencyJumpPlan | undefined;
     if (replanReason) {
       const proposed = this.planner.plan(input, replanReason);
+      this.setDangerPressure(
+        Math.max(
+          currentUnsafe ? 1 : 0,
+          planningDangerPressure(proposed, snapshot.aoes.length),
+        ),
+        snapshot.time,
+      );
       this.lastPlanAt = snapshot.time;
       if (replanReason === 'urgent') this.lastUrgentPlanAt = snapshot.time;
       const proposedRemainingMs = trajectoryRemainingMs(proposed.trajectory, snapshot.time);
@@ -564,6 +597,8 @@ export class PredictiveAutoDodgeController {
       jumpStatus: this.projectileJump ? snapshot.jumpStatus ?? 'ready' : 'disabled',
       planRevision: this.planRevision,
       planReused: result.planReused,
+      safetyState: this.safetyState,
+      retreatPenaltyScale: this.retreatPenaltyScale,
       lastReplanAt: this.lastReplanAt,
       replanReason: result.replanReason,
       dangerRevision: this.dangerRevision,
@@ -577,6 +612,57 @@ export class PredictiveAutoDodgeController {
       plannerMetrics: this.planner.getMetrics(),
     };
     return this.state;
+  }
+
+  private advanceSafetyState(
+    now: number,
+    intent: DodgeMovementIntent | null,
+    position: { x: number; y: number },
+  ): void {
+    const previousUpdate = this.lastSafetyUpdateAt;
+    this.lastSafetyUpdateAt = now;
+    if (previousUpdate === null) return;
+    const elapsedMs = Math.max(0, now - previousUpdate);
+
+    if (this.dangerPressure > 0) {
+      this.safetyState = 'evasive';
+      const targetScale = 1 - this.dangerPressure;
+      const response = clamp(elapsedMs / EVASIVE_RETREAT_RESPONSE_MS, 0, 1);
+      this.retreatPenaltyScale += (targetScale - this.retreatPenaltyScale) * response;
+      return;
+    }
+
+    if (this.safetyState === 'evasive') this.safetyState = 'recovering';
+    if (this.safetyState !== 'recovering') {
+      this.retreatPenaltyScale = 1;
+      return;
+    }
+
+    this.retreatPenaltyScale = Math.min(
+      1,
+      this.retreatPenaltyScale + elapsedMs / RECOVERY_RETREAT_RESPONSE_MS,
+    );
+    if (this.retreatPenaltyScale >= 1 && movementIntentSatisfied(intent, position)) {
+      this.safetyState = 'normal';
+    }
+  }
+
+  private setDangerPressure(pressure: number, now: number): void {
+    const normalized = clamp(pressure, 0, 1);
+    if (normalized > 0) {
+      if (this.safetyState !== 'evasive') {
+        const targetScale = 1 - normalized;
+        const initialResponse = EVASIVE_INITIAL_RESPONSE_MS / EVASIVE_RETREAT_RESPONSE_MS;
+        this.retreatPenaltyScale += (
+          targetScale - this.retreatPenaltyScale
+        ) * initialResponse;
+      }
+      this.safetyState = 'evasive';
+    } else if (this.dangerPressure > 0 || this.safetyState === 'evasive') {
+      this.safetyState = 'recovering';
+    }
+    this.dangerPressure = normalized;
+    this.lastSafetyUpdateAt ??= now;
   }
 }
 
@@ -671,6 +757,8 @@ function emptyState(
     jumpStatus: 'disabled',
     planRevision: 0,
     planReused: false,
+    safetyState: 'normal',
+    retreatPenaltyScale: 1,
     lastReplanAt: null,
     replanReason: null,
     dangerRevision: 0,
@@ -705,6 +793,23 @@ function cloneTrajectory(trajectory: DodgeTrajectory): DodgeTrajectory {
     createdAt: trajectory.createdAt,
     waypoints: trajectory.waypoints.map((waypoint) => ({ ...waypoint })),
   };
+}
+
+function planningDangerPressure(result: DodgePlanningResult, activeAoes: number): number {
+  if (!result.reachesHorizon && result.activeProjectileCount + activeAoes > 0) return 1;
+  const impactMs = result.earliestIntentCollisionMs;
+  if (impactMs === null || impactMs === undefined) return 0;
+  return clamp((EVASIVE_IMPACT_WINDOW_MS - impactMs) / EVASIVE_IMPACT_WINDOW_MS, 0, 1);
+}
+
+function movementIntentSatisfied(
+  intent: DodgeMovementIntent | null,
+  position: { x: number; y: number },
+): boolean {
+  if (intent?.mode !== 'combat_range') return true;
+  const distance = Math.hypot(position.x - intent.targetX, position.y - intent.targetY);
+  return distance >= intent.preferredMinimumRange - 1e-6
+    && distance <= intent.preferredMaximumRange + 1e-6;
 }
 
 function trajectoryRemainingMs(trajectory: DodgeTrajectory, now: number): number {
