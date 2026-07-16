@@ -99,6 +99,7 @@ import {
   type CombatPathfindingRange,
 } from './explorative-pathfinder';
 import { DodgeCollisionWorld } from './dodge-collision-world';
+import { DodgeJumpLimiter } from './dodge-jump-limiter';
 import { MovementController, movementSpeed, type MovementSnapshot } from './movement-controller';
 import {
   PredictiveAutoDodgeController,
@@ -125,6 +126,27 @@ export const BACKPACK_SLOT_IDS = [
 export interface ViewerProjectileSnapshot extends Omit<CombatProjectileSnapshot, 'side'> {
   side: 'own' | 'enemy' | 'other';
 }
+
+export interface ViewerAoeSnapshot {
+  id: number;
+  x: number;
+  y: number;
+  radius: number;
+  damage: number;
+  effect: number;
+  duration: number;
+  origType: number;
+  color: number;
+  armorPiercing: boolean;
+  startTime: number;
+  lifetimeMs: number;
+  /** Predicted landing telegraph emitted before the authoritative AOE packet. */
+  pending?: boolean;
+  landingTime?: number;
+}
+
+const VIEWER_AOE_LIFETIME_MS = 750;
+const MAX_VIEWER_AOES = 256;
 
 enum AoeEffectId {
   Quiet = 2,
@@ -268,12 +290,15 @@ export class Client extends EventEmitter {
   private readonly pathfinder: ExplorativePathfinder;
   private readonly dodgeWorld: DodgeCollisionWorld | undefined;
   private readonly autoDodge: PredictiveAutoDodgeController | undefined;
+  private readonly dodgeJumpLimiter = new DodgeJumpLimiter();
   private readonly thrownAoes: ThrownAoeTracker | undefined;
   private readonly portalTracker = new PortalTracker();
   private readonly autoNexus: AutoNexusMonitor;
   private readonly combat: CombatTracker | undefined;
   private viewerOtherProjectilesEnabled = false;
   private readonly viewerOtherProjectiles = new Map<string, ViewerProjectileSnapshot>();
+  private readonly viewerAoes: ViewerAoeSnapshot[] = [];
+  private nextViewerAoeId = 1;
   private readonly autoCombat: AutoCombatController | undefined;
   private readonly commands = new CommandSender(() => ({
     io: this.io,
@@ -713,6 +738,35 @@ export class Client extends EventEmitter {
     }
     out.push(...this.viewerOtherProjectiles.values());
     return out;
+  }
+
+  /** Incoming telegraphs and recent server-confirmed area attacks for the viewer overlay. */
+  getViewerAoes(): ViewerAoeSnapshot[] {
+    const now = this.time();
+    for (let i = this.viewerAoes.length - 1; i >= 0; i--) {
+      const aoe = this.viewerAoes[i];
+      if (now - aoe.startTime > aoe.lifetimeMs) this.viewerAoes.splice(i, 1);
+    }
+    const aoes = this.viewerAoes.slice();
+    for (const thrown of this.thrownAoes?.getActive(now) ?? []) {
+      aoes.push({
+        id: -thrown.id,
+        x: thrown.x,
+        y: thrown.y,
+        radius: thrown.radius,
+        damage: 0,
+        effect: 0,
+        duration: 0,
+        origType: 0,
+        color: 0xff424c,
+        armorPiercing: false,
+        startTime: now,
+        lifetimeMs: Math.max(1, thrown.landingTime - now),
+        pending: true,
+        landingTime: thrown.landingTime,
+      });
+    }
+    return aoes;
   }
 
   /** Latest position the server reported for us (authoritative), if any. */
@@ -2394,6 +2448,7 @@ export class Client extends EventEmitter {
     this.pathfinder.resetMap();
     this.dodgeWorld?.reset();
     this.autoDodge?.reset();
+    this.dodgeJumpLimiter.resetMap(this.time());
     this.thrownAoes?.clear();
     this.recentObjectTypes.clear();
     this.predictedPlayerDamage.clear();
@@ -2403,6 +2458,7 @@ export class Client extends EventEmitter {
     this.autoNexus.setSafeMap(true);
     this.combat?.clear();
     this.viewerOtherProjectiles.clear();
+    this.viewerAoes.length = 0;
     this.autoCombat?.clearMap();
     this.portalTracker.clear();
   }
@@ -2558,6 +2614,7 @@ export class Client extends EventEmitter {
     this.localFrameTimer = undefined;
     this.combat?.clear();
     this.viewerOtherProjectiles.clear();
+    this.viewerAoes.length = 0;
     this.destroySocket();
     this.timers.clear(this.stallResumeTimer);
     this.stallResumeTimer = undefined;
@@ -2590,6 +2647,9 @@ export class Client extends EventEmitter {
       const unexpected =
         state !== ClientLifecycleState.Stopped && state !== ClientLifecycleState.Reconnecting;
       if (unexpected) {
+        if (this.dodgeJumpLimiter.noteDisconnect(this.time())) {
+          console.warn(`${this.tag} reducing dodge-jump allowance after a suspicious disconnect`);
+        }
         this.lifecycle.transition(ClientLifecycleState.Disconnected);
       }
       this.stopWatchdog();
@@ -3169,6 +3229,7 @@ export class Client extends EventEmitter {
     const dodgeGoal = movementGoal
       ? boundedMovementGoal(this.pos, movementGoal, MAX_LOCAL_GOAL_DISTANCE)
       : undefined;
+    const jumpLimiterState = this.dodgeJumpLimiter.getState(now);
     this.dodgeWorld?.setExplorativeUnknown(this.pathfinder.hasTarget());
     const dodgeState = this.autoDodge?.isEnabled() && this.combat && this.dodgeWorld && this.thrownAoes
       ? this.autoDodge.evaluate({
@@ -3180,17 +3241,31 @@ export class Client extends EventEmitter {
           intentVelocity,
           movementLeadMs: dt,
           movementLocked,
+          jumpAllowance: jumpLimiterState.allowance,
+          jumpStatus: jumpLimiterState.status,
           projectiles: this.combat.getActiveProjectiles(),
           aoes: this.thrownAoes.getActive(now),
           environment: this.dodgeWorld,
         })
       : undefined;
-    const velocityOverride = dodgeState?.overrideActive ? dodgeState.velocity : undefined;
+    const jumpTarget = dodgeState?.jumpTarget ?? undefined;
+    const jumpCommitted = jumpTarget
+      ? this.dodgeJumpLimiter.commit(now, this.pos, jumpTarget)
+      : false;
+    if (jumpTarget) this.autoDodge?.resolveJumpAttempt(jumpCommitted, now);
+    const positionOverride = jumpCommitted ? jumpTarget : undefined;
+    const velocityOverride = dodgeState?.overrideActive && !positionOverride
+      ? dodgeState.velocity
+      : undefined;
     if (movementLocked) return;
-    if (!this.movement.hasTarget() && !velocityOverride) return;
+    if ((jumpLimiterState.status === 'awaiting_move'
+      || jumpLimiterState.status === 'awaiting_confirmation')
+      && !positionOverride) return;
+    if (!this.movement.hasTarget() && !velocityOverride && !positionOverride) return;
 
     const update = this.movement.update(snapshot, dt, {
       integrateFromLocal,
+      positionOverride,
       velocityOverride,
       trackTargetProgress: dodgeState?.decision === 'follow_goal'
         || dodgeState?.decision === 'goal_blocked'
@@ -3251,6 +3326,7 @@ export class Client extends EventEmitter {
     record.y = this.pos.y;
     move.records = [record]; // must send >= 1 record or the server drops us
     this.io.send(move);
+    this.dodgeJumpLimiter.markSent(now, { x: record.x, y: record.y });
   }
 
   /** Applies per-object status deltas from the tick to player and portal state. */
@@ -3259,6 +3335,17 @@ export class Client extends EventEmitter {
     for (const status of p.statuses) {
       if (status.objectId === this.objectId) {
         this.serverPos = { x: status.pos.x, y: status.pos.y };
+        this.dodgeJumpLimiter.observeAuthoritative(this.time(), this.serverPos);
+        if (this.dodgeJumpLimiter.consumeCorrectionRebase()) {
+          this.pos = { ...this.serverPos };
+          this.autoDodge?.rebase(this.serverPos, this.time());
+          const jumpState = this.dodgeJumpLimiter.getState(this.time());
+          console.warn(
+            `${this.tag} dodge jump corrected by server; learned limit is now `
+              + `${jumpState.learnedMaxDistance.toFixed(2)} tiles with `
+              + `${Math.ceil(jumpState.backoffRemainingMs)}ms backoff`,
+          );
+        }
         this.player = processObjectStatus(status, this.player);
         selfUpdated = true;
         this.capturePetObjectId(status.stats);
@@ -3498,18 +3585,38 @@ export class Client extends EventEmitter {
     this.dodgeWorld?.markEnemyThreat(p.ownerId);
     const ownerType = this.objects.get(p.ownerId)?.type ?? this.recentObjectTypes.get(p.ownerId);
     this.combat?.trackEnemyShoot(p, ownerType, this.time());
+    const shotCount = p.numShots > 0 && p.numShots !== 0xff ? p.numShots : 1;
+    this.autoDodge?.noteProjectileUpdate(shotCount);
   }
 
   /** Tracks announced thrown-projectile endpoints before their AOE packet arrives. */
   private handleShowEffect(p: ShowEffectPacket): void {
     if (p.effectType !== VisualEffect.THROW_PROJECTILE) return;
     this.thrownAoes?.track(p.color, p.pos1, p.duration, this.time());
+    this.autoDodge?.noteDangerUpdate();
   }
 
   /** Processes and acknowledges an area attack using the current local frame state. */
   private handleAoe(p: AoePacket): void {
     const ackTime = this.time();
     this.thrownAoes?.recordAoe(p.pos, p.radius, ackTime);
+    this.viewerAoes.push({
+      id: this.nextViewerAoeId++,
+      x: p.pos.x,
+      y: p.pos.y,
+      radius: p.radius,
+      damage: p.damage,
+      effect: p.effect,
+      duration: p.duration,
+      origType: p.origType,
+      color: p.color,
+      armorPiercing: p.armorPiercing,
+      startTime: ackTime,
+      lifetimeMs: VIEWER_AOE_LIFETIME_MS,
+    });
+    if (this.viewerAoes.length > MAX_VIEWER_AOES) {
+      this.viewerAoes.splice(0, this.viewerAoes.length - MAX_VIEWER_AOES);
+    }
     const ack = new AoeAckPacket();
     ack.time = ackTime;
 
@@ -3620,6 +3727,10 @@ export class Client extends EventEmitter {
       this.pos = position;
       this.serverPos = { ...position };
       this.posKnown = true;
+      const now = this.time();
+      this.dodgeJumpLimiter.observeAuthoritative(now, position);
+      this.dodgeJumpLimiter.consumeCorrectionRebase();
+      this.autoDodge?.rebase(position, now);
     } else {
       const tracked = this.objects.get(p.objectId);
       if (tracked) {
@@ -3837,6 +3948,9 @@ export class Client extends EventEmitter {
    */
   private handleFailure(p: FailurePacket): void {
     const failureClass = classifyFailure(p.errorDescription);
+    if (this.dodgeJumpLimiter.noteDisconnect(this.time())) {
+      console.warn(`${this.tag} reducing dodge-jump allowance after a failure near an unconfirmed jump`);
+    }
     console.error(
       `${this.tag} ❌ FAILURE ${p.errorId} (${this.describeFailure(p)}) [${failureClass}]: ${p.errorDescription}`,
     );

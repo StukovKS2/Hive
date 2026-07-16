@@ -14,6 +14,8 @@ import {
 export interface CombatProjectileDefinition {
   speed: number;
   lifetimeMs: number;
+  /** Collision radius in tiles. Game data derives this from projectile XML size. */
+  hitRadius?: number;
   /** Unscaled lifetime used by path shapes whose phase is tied to XML lifetime. */
   trajectoryLifetimeMs?: number;
   multiHit: boolean;

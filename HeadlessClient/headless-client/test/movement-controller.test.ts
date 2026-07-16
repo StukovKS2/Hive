@@ -122,3 +122,22 @@ test('MovementController can dodge from standstill without creating a walk targe
   assert.deepEqual(update.pos, { x: 1.5, y: 2 });
   assert.equal(movement.hasTarget(), false);
 });
+
+test('MovementController applies a dodge jump without integrating it as velocity', () => {
+  const movement = new MovementController();
+  movement.setTarget({ x: 10, y: 2 }, 0.1);
+  const update = movement.update(
+    {
+      localPos: { x: 2, y: 2 },
+      serverPos: { x: 1.5, y: 2 },
+      playerSpeed: 75,
+      playerSpeedBoost: 0,
+    },
+    16,
+    { positionOverride: { x: 3.23, y: 2.41 } },
+  );
+
+  assert.deepEqual(update.pos, { x: 3.23, y: 2.41 });
+  assert.equal(movement.hasTarget(), true);
+  assert.deepEqual(movement.getTarget(), { x: 10, y: 2, threshold: 0.1 });
+});

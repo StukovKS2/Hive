@@ -426,6 +426,8 @@ export function installHeadlessBridge(deps: BridgeDeps): void {
     stopFollowing(client);
     return client.navigateTo({ x, y }, options.arriveThreshold, {
       safeWalk: options.safeWalk,
+      projectileJump: options.projectileJump,
+      maxJumpDistance: options.maxJumpDistance,
     });
   };
   Walking.pathfindingWalkToCombatTarget = (x: number, y: number, options = {}) => {
@@ -448,6 +450,8 @@ export function installHeadlessBridge(deps: BridgeDeps): void {
     }
     return client.navigateToCombatTarget({ x, y }, range, {
       safeWalk: options.safeWalk,
+      projectileJump: options.projectileJump,
+      maxJumpDistance: options.maxJumpDistance,
     });
   };
   Walking.walkToPosition = (position: Position) => {

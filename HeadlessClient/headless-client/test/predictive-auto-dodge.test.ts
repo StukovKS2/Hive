@@ -52,12 +52,84 @@ test('predictive auto-dodge escapes an imminent projectile from standstill', () 
   assert.equal(state.overrideActive, true);
   assert.ok(state.threatCount > 0);
   assert.ok(state.earliestImpactMs !== null && state.earliestImpactMs <= 250);
+  assert.ok(state.trajectory?.waypoints.some((waypoint) => waypoint.speed > 0));
+});
+
+test('predictive auto-dodge uses an exact 0.5 projectile collision box', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true);
+  const touching = controller.evaluate({
+    time: 0,
+    playerId: 10,
+    position: { x: 5, y: 5 },
+    moveSpeed: 0.0096,
+    intentVelocity: { x: 0, y: 0 },
+    movementLeadMs: 16,
+    projectiles: [{
+      ...hostileProjectile(),
+      startX: 5,
+      startY: 5.5,
+      definition: { ...definition, speed: 0 },
+    }],
+    aoes: [],
+    environment: openEnvironment,
+  });
+
+  assert.equal(touching.earliestImpactMs, 0);
+  assert.equal(touching.overrideActive, true);
+
+  const outside = controller.evaluate({
+    time: 100,
+    playerId: 10,
+    position: { x: 5, y: 5 },
+    moveSpeed: 0.0096,
+    intentVelocity: { x: 0, y: 0 },
+    movementLeadMs: 16,
+    projectiles: [{
+      ...hostileProjectile(),
+      startTime: 100,
+      startX: 5,
+      startY: 5.5001,
+      definition: { ...definition, speed: 0 },
+    }],
+    aoes: [],
+    environment: openEnvironment,
+  });
+
+  assert.equal(outside.earliestImpactMs, null);
+});
+
+test('projectile jump remains unused while a legal continuous trajectory survives', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true, { projectileJump: true });
+  const state = controller.evaluate({
+    time: 300,
+    playerId: 10,
+    position: { x: 5, y: 5 },
+    goal: { x: 10, y: 5 },
+    moveSpeed: 0.004,
+    intentVelocity: { x: 0.004, y: 0 },
+    movementLeadMs: 16,
+    jumpAllowance: 0.73,
+    jumpStatus: 'ready',
+    projectiles: [hostileProjectile()],
+    aoes: [],
+    environment: {
+      canOccupy: (_x, y) => y >= 5,
+      isProjectileSegmentOpen: () => true,
+    },
+  });
+
+  assert.equal(state.decision, 'goal_path');
+  assert.equal(state.jumpTarget, null);
+  assert.equal(state.jumpDistance, 0);
   assert.ok(Math.hypot(state.velocity.x, state.velocity.y) > 0);
+  assert.ok(state.trajectory?.waypoints.length);
 });
 
 test('predictive auto-dodge preserves a movement intent that already clears the shot', () => {
   const controller = new PredictiveAutoDodgeController();
-  controller.setEnabled(true);
+  controller.setEnabled(true, { projectileJump: true });
   const state = controller.evaluate({
     time: 300,
     playerId: 10,
@@ -65,12 +137,15 @@ test('predictive auto-dodge preserves a movement intent that already clears the 
     moveSpeed: 0.0096,
     intentVelocity: { x: 0.0096, y: 0 },
     movementLeadMs: 16,
+    jumpAllowance: 1,
+    jumpStatus: 'ready',
     projectiles: [hostileProjectile()],
     aoes: [],
     environment: openEnvironment,
   });
 
   assert.equal(state.overrideActive, false);
+  assert.equal(state.jumpTarget, null);
   assert.equal(state.decision, 'preserve_safe_intent');
   assert.deepEqual(state.velocity, { x: 0.0096, y: 0 });
 });
@@ -98,6 +173,119 @@ test('enabled auto-dodge owns safe movement and derives velocity from the goal',
   assert.deepEqual(state.target, state.path[0]);
   assert.ok(state.path.at(-1)!.x > state.path[0]!.x);
   assert.ok(state.path.every((point) => point.y === 5));
+  assert.equal(state.path.length, 2, 'straight time samples should collapse into one route vector');
+});
+
+test('rolling planner replans only when a danger update invalidates the timed trajectory', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true);
+  const goal = { x: 10, y: 5 };
+  const base = {
+    playerId: 10,
+    goal,
+    moveSpeed: 0.004,
+    intentVelocity: { x: 0.004, y: 0 },
+    movementLeadMs: 16,
+    aoes: [],
+    environment: openEnvironment,
+  };
+  const initial = controller.evaluate({
+    ...base,
+    time: 0,
+    position: { x: 5, y: 5 },
+    projectiles: [],
+  });
+  assert.equal(initial.planRevision, 1);
+  assert.equal(initial.planReused, false);
+
+  const harmless = {
+    ...hostileProjectile(),
+    bulletId: 8,
+    startY: 6.5,
+  };
+  const secondPosition = {
+    x: 5 + initial.velocity.x * 16,
+    y: 5 + initial.velocity.y * 16,
+  };
+  const harmlessUpdate = controller.evaluate({
+    ...base,
+    time: 16,
+    position: secondPosition,
+    projectiles: [harmless],
+  });
+  assert.equal(harmlessUpdate.planRevision, 1);
+  assert.equal(harmlessUpdate.planReused, true);
+  assert.ok(harmlessUpdate.dangerRevision > initial.dangerRevision);
+
+  const futureAoe = { x: 6.6, y: 5, radius: 0.65, landingTime: 400 };
+  const thirdPosition = {
+    x: secondPosition.x + harmlessUpdate.velocity.x * 16,
+    y: secondPosition.y + harmlessUpdate.velocity.y * 16,
+  };
+  const invalidated = controller.evaluate({
+    ...base,
+    time: 32,
+    position: thirdPosition,
+    projectiles: [],
+    aoes: [futureAoe],
+  });
+  assert.equal(invalidated.planRevision, 2);
+  assert.equal(invalidated.planReused, false);
+
+  const fourthPosition = {
+    x: thirdPosition.x + invalidated.velocity.x * 16,
+    y: thirdPosition.y + invalidated.velocity.y * 16,
+  };
+  const stable = controller.evaluate({
+    ...base,
+    time: 48,
+    position: fourthPosition,
+    projectiles: [],
+    aoes: [futureAoe],
+  });
+  assert.equal(stable.planRevision, 2);
+  assert.equal(stable.planReused, true);
+});
+
+test('frequent harmless projectile updates do not thrash the active timed trajectory', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true);
+  const base = {
+    playerId: 10,
+    goal: { x: 10, y: 5 },
+    moveSpeed: 0.004,
+    intentVelocity: { x: 0.004, y: 0 },
+    movementLeadMs: 16,
+    aoes: [],
+    environment: openEnvironment,
+  };
+  let position = { x: 5, y: 5 };
+  let state = controller.evaluate({ ...base, time: 0, position, projectiles: [] });
+
+  for (let frame = 1; frame <= 20; frame++) {
+    position = {
+      x: position.x + state.velocity.x * 16,
+      y: position.y + state.velocity.y * 16,
+    };
+    const time = frame * 16;
+    state = controller.evaluate({
+      ...base,
+      time,
+      position,
+      projectiles: [{
+        ...hostileProjectile(),
+        bulletId: 100 + frame,
+        startX: position.x - 1,
+        startY: 6.5,
+        startTime: time,
+      }],
+    });
+    assert.equal(state.planRevision, 1, `unexpected replan on frame ${frame}`);
+    assert.equal(state.planReused, true);
+  }
+
+  assert.ok(state.dangerRevision >= 20);
+  assert.equal(state.lastReplanAt, 0);
 });
 
 test('goal-owned dodge stops instead of bypassing local collision when no route exists', () => {
@@ -143,9 +331,9 @@ test('goal-aware auto-dodge takes a lateral detour and resumes toward the waypoi
   assert.equal(state.overrideActive, true);
   assert.equal(state.decision, 'goal_path');
   assert.ok(state.velocity.x > 0, `expected forward progress, got ${state.velocity.x}`);
-  assert.ok(Math.abs(state.velocity.y) > 0.001, `expected a lateral detour, got ${state.velocity.y}`);
   assert.deepEqual(state.goal, { x: 10, y: 5 });
   assert.ok(state.path.length >= 2);
+  assert.ok(state.path.some((point) => Math.abs(point.y - 5) > 0.2));
   assert.ok(state.path.at(-1)!.x > state.path[0]!.x, 'route should turn back toward the waypoint');
   assert.ok(routeTurnCount({ x: 5, y: 5 }, state.path) >= 1, 'route should contain a real turn');
 });
@@ -174,9 +362,65 @@ test('goal-aware auto-dodge plans around a moving projectile crossing the route'
 
   assert.equal(state.overrideActive, true);
   assert.equal(state.decision, 'goal_path');
-  assert.ok(state.velocity.x > 0, `expected forward progress, got ${state.velocity.x}`);
-  assert.ok(Math.abs(state.velocity.y) > 0.001, `expected a lateral detour, got ${state.velocity.y}`);
   assert.ok(state.path.length >= 2);
+  assert.ok(state.path.some((point) => Math.abs(point.y - 5) > 0.2));
+  assert.ok(state.path.at(-1)!.x > state.path[0]!.x, 'route should recover forward progress');
+});
+
+test('time-layered danger search uses non-cardinal vectors in a narrow angular route', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true);
+  const slope = Math.tan(Math.PI / 8);
+  const state = controller.evaluate({
+    time: 0,
+    playerId: 10,
+    position: { x: 5, y: 5 },
+    goal: { x: 10, y: 5 },
+    moveSpeed: 0.004,
+    intentVelocity: { x: 0.004, y: 0 },
+    movementLeadMs: 16,
+    projectiles: [],
+    aoes: [],
+    environment: {
+      canOccupy: (x, y) => x >= 6.5
+        || x >= 5 && Math.abs(y - (5 + (x - 5) * slope)) <= 0.03,
+      isProjectileSegmentOpen: () => true,
+    },
+  });
+
+  assert.equal(state.decision, 'goal_path');
+  const angle = Math.atan2(state.velocity.y, state.velocity.x);
+  assert.ok(angle > 0.2 && angle < 0.5, `expected a shallow angular vector, got ${angle}`);
+  assert.ok(Math.abs(angle / (Math.PI / 4) - Math.round(angle / (Math.PI / 4))) > 0.1);
+  assert.ok(state.path.at(-1)!.x > state.path[0]!.x);
+});
+
+test('imminent goal collision produces a finite swept-safe timed trajectory', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true);
+  const state = controller.evaluate({
+    time: 225,
+    playerId: 10,
+    position: { x: 5, y: 5 },
+    goal: { x: 10, y: 5 },
+    moveSpeed: 0.0096,
+    intentVelocity: { x: 0.0096, y: 0 },
+    movementLeadMs: 16,
+    projectiles: [{
+      ...hostileProjectile(),
+      definition: { ...definition, speed: 200 },
+    }],
+    aoes: [],
+    environment: openEnvironment,
+  });
+
+  assert.equal(state.overrideActive, true);
+  assert.ok(state.earliestImpactMs !== null && state.earliestImpactMs <= 120);
+  assert.ok(state.trajectory?.waypoints.length);
+  assert.ok(state.trajectory!.waypoints.every((waypoint) => (
+    Number.isFinite(waypoint.x) && Number.isFinite(waypoint.y) && Number.isFinite(waypoint.speed)
+  )));
+  assert.ok(state.plannerMetrics.candidatesRejectedByProjectiles > 0);
 });
 
 test('goal path searches around threats without crossing static collision', () => {
@@ -207,6 +451,35 @@ test('goal path searches around threats without crossing static collision', () =
   assert.ok(rejectedStaticCandidates > 0);
   assert.ok(state.path.every((point) => point.y >= 5));
   assert.ok(state.path.some((point) => point.y > 5.2));
+});
+
+test('goal path arcs around an enemy exclusion circle while advancing', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true);
+  const enemy = { x: 6.5, y: 5 };
+  const state = controller.evaluate({
+    time: 0,
+    playerId: 10,
+    position: { x: 5, y: 5 },
+    goal: { x: 10, y: 5 },
+    moveSpeed: 0.004,
+    intentVelocity: { x: 0.004, y: 0 },
+    movementLeadMs: 16,
+    projectiles: [],
+    aoes: [],
+    environment: {
+      canOccupy: () => true,
+      enemyClearance: (x, y) => Math.hypot(x - enemy.x, y - enemy.y),
+      isProjectileSegmentOpen: () => true,
+    },
+  });
+
+  assert.equal(state.decision, 'goal_path');
+  assert.ok(state.path.some((point) => Math.abs(point.y - enemy.y) > 0.3));
+  assert.ok(state.path.every((point) => (
+    Math.hypot(point.x - enemy.x, point.y - enemy.y) >= ENEMY_AVOID_RADIUS - 1e-9
+  )));
+  assert.ok(state.path.at(-1)!.x > state.path[0]!.x, 'route should recover forward progress');
 });
 
 test('predictive auto-dodge moves out of a thrown AOE before landing', () => {
@@ -295,7 +568,10 @@ test('predictive auto-dodge prefers a broad safe corridor over an isolated direc
   });
 
   assert.equal(state.overrideActive, true);
-  assert.ok(state.velocity.x < 0, `expected broad western corridor, got ${state.velocity.x}`);
+  assert.ok(
+    state.trajectory?.waypoints.some((waypoint) => waypoint.x < 5),
+    'expected the timed trajectory to preserve the broad western corridor',
+  );
 });
 
 test('dodge velocity overrides the active pathfinding waypoint velocity', () => {

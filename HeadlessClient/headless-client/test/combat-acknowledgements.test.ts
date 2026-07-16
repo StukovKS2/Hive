@@ -12,11 +12,14 @@ import {
   Packet,
   PlayerData,
   ServerPlayerShootPacket,
+  ShowEffectPacket,
   ShootAckPacket,
+  VisualEffect,
 } from 'realmlib';
 import { Client } from '../src/client';
 import type { CombatProjectileDefinition } from '../src/combat-tracker';
 import { ClientEvent } from '../src/events';
+import { ThrownAoeTracker } from '../src/predictive-auto-dodge';
 
 test('enemy and owned player shoots send a one-count SHOOTACK', () => {
   const { client, sent } = harness();
@@ -142,6 +145,85 @@ test('AOE is acknowledged with the current client time and local player position
   assert.ok(sent[0] instanceof AoeAckPacket);
   assert.equal(sent[0].time, 456);
   assert.deepEqual({ x: sent[0].position.x, y: sent[0].position.y }, { x: 4, y: 6 });
+});
+
+test('AOE is retained briefly for the viewer with its server radius and color', () => {
+  const { client } = harness();
+  const aoe = new AoePacket();
+  aoe.pos.x = 8.5;
+  aoe.pos.y = 12.25;
+  aoe.radius = 3.75;
+  aoe.damage = 120;
+  aoe.effect = 38;
+  aoe.duration = 1.5;
+  aoe.origType = 0x1234;
+  aoe.color = 0xff3366;
+  aoe.armorPiercing = true;
+
+  invoke(client, 'handleAoe', aoe);
+
+  assert.deepEqual(client.getViewerAoes(), [{
+    id: 1,
+    x: 8.5,
+    y: 12.25,
+    radius: 3.75,
+    damage: 120,
+    effect: 38,
+    duration: 1.5,
+    origType: 0x1234,
+    color: 0xff3366,
+    armorPiercing: true,
+    startTime: 456,
+    lifetimeMs: 750,
+  }]);
+
+  Object.assign(client as unknown as Record<string, unknown>, { time: () => 1207 });
+  assert.deepEqual(client.getViewerAoes(), []);
+});
+
+test('thrown AOEs are exposed to the viewer as pending landing telegraphs', () => {
+  const { client } = harness();
+  Object.assign(client as unknown as Record<string, unknown>, {
+    thrownAoes: new ThrownAoeTracker(),
+  });
+  const effect = new ShowEffectPacket();
+  effect.effectType = VisualEffect.THROW_PROJECTILE;
+  effect.pos1.x = 8.5;
+  effect.pos1.y = 12.25;
+  effect.color = 0xff3366;
+  effect.duration = 0.8;
+
+  invoke(client, 'handleShowEffect', effect);
+
+  assert.deepEqual(client.getViewerAoes(), [{
+    id: -1,
+    x: 8.5,
+    y: 12.25,
+    radius: 1,
+    damage: 0,
+    effect: 0,
+    duration: 0,
+    origType: 0,
+    color: 0xff424c,
+    armorPiercing: false,
+    startTime: 456,
+    lifetimeMs: 800,
+    pending: true,
+    landingTime: 1256,
+  }]);
+
+  Object.assign(client as unknown as Record<string, unknown>, { time: () => 1256 });
+  const landed = new AoePacket();
+  landed.pos.x = 8.5;
+  landed.pos.y = 12.25;
+  landed.radius = 2.5;
+  landed.color = 0xff3366;
+  invoke(client, 'handleAoe', landed);
+
+  const visible = client.getViewerAoes();
+  assert.equal(visible.length, 1);
+  assert.equal(visible[0]?.pending, undefined);
+  assert.equal(visible[0]?.radius, 2.5);
 });
 
 test('AOE without a player is acknowledged at zero even if stale position state remains', () => {

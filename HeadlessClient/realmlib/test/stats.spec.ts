@@ -117,6 +117,18 @@ describe('processStatData (current build ids)', () => {
     expect(playerData.hasBackpack).to.equal(true);
   });
 
+  it('does not treat PetType stat 79 as a backpack signal', () => {
+    const playerData = processStatData([
+      statData(StatType.HASBACKPACK_STAT, 0),
+      statData(79, -1),
+      statData(StatType.BACKPACK_SLOTS_STAT, 0),
+    ]);
+    expect(StatType.HASBACKPACK_STAT).to.equal(75);
+    expect(playerData.backpackTier).to.equal(0);
+    expect(playerData.legacyHasBackpack).to.equal(false);
+    expect(playerData.hasBackpack).to.equal(false);
+  });
+
   it('separates name decoration metadata from the visible name', () => {
     const playerData = processStatData([statData(StatType.NAME_STAT, 0, 'FaZeRaptor,a19d,fe3')]);
     expect(playerData.name).to.equal('FaZeRaptor');

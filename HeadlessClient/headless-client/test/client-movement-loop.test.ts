@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ConditionEffectBits, GotoAckPacket, GotoPacket, MovePacket, NewTickPacket, Packet, PlayerData } from 'realmlib';
 import { Client } from '../src/client';
+import { DodgeJumpLimiter } from '../src/dodge-jump-limiter';
 
 interface MovementClientState {
   pos: { x: number; y: number };
@@ -11,11 +12,13 @@ interface MovementClientState {
   lastFrameTime: number;
   lastLocalMovementAt: number;
   objectId: number;
+  dodgeJumpLimiter: DodgeJumpLimiter;
   io: { send(packet: Packet): void };
   time(): number;
   updateLocalFrame(now: number): void;
   handleGoto(packet: GotoPacket): void;
   handleNewTick(packet: NewTickPacket): void;
+  sendMove(packet: NewTickPacket, now: number): void;
   updateStatuses(packet: NewTickPacket): boolean;
   nexusImmediately(reason?: string): boolean;
 }
@@ -96,6 +99,45 @@ test('NEWTICK sends no movement after authoritative HP triggers autonexus', () =
 
   assert.equal(nexusCalls, 1);
   assert.equal(sent.length, 0);
+});
+
+test('dodge jump is reported only through the next normal MOVE record', () => {
+  const client = movementClient();
+  const state = client as unknown as MovementClientState;
+  const sent: Packet[] = [];
+  Object.assign(state, {
+    pos: { x: 1.23, y: 0.41 },
+    lastLocalMovementAt: 1100,
+    io: { send: (packet: Packet) => sent.push(packet) },
+  });
+  assert.equal(state.dodgeJumpLimiter.commit(
+    1000,
+    { x: 0, y: 0 },
+    { x: 1.23, y: 0.41 },
+    1.5,
+  ), false, 'initial learned limit should reject a jump above one tile');
+  assert.equal(state.dodgeJumpLimiter.commit(
+    1000,
+    { x: 0.23, y: 0.41 },
+    { x: 1.23, y: 0.41 },
+    1.5,
+  ), true);
+  client.moveTo({ x: 10, y: 0.41 }, 0.1);
+  state.updateLocalFrame(1116);
+  assert.deepEqual(state.pos, { x: 1.23, y: 0.41 }, 'walking must wait for the jump MOVE');
+
+  const tick = new NewTickPacket();
+  tick.tickId = 9;
+  tick.serverRealTimeMS = 6000;
+  state.sendMove(tick, 1200);
+
+  assert.equal(sent.length, 1);
+  assert.ok(sent[0] instanceof MovePacket);
+  assert.deepEqual(
+    { x: sent[0].records[0].x, y: sent[0].records[0].y },
+    { x: 1.23, y: 0.41 },
+  );
+  assert.equal(state.dodgeJumpLimiter.getState(1200).status, 'awaiting_confirmation');
 });
 
 test('bleeding is predicted between server ticks and can trigger autonexus', () => {

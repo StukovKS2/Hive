@@ -8,6 +8,7 @@ export type {
   ItemContainer,
   PacketContext,
   PacketTraffic,
+  ViewerAoeSnapshot,
 } from './client';
 export { ClientEvent } from './events';
 export {
@@ -61,7 +62,39 @@ export type {
   CombatTile,
   CombatWorldSnapshot,
 } from './combat-tracker';
-export { DodgeCollisionWorld } from './dodge-collision-world';
+export {
+  DodgeCollisionWorld,
+  ENEMY_AVOID_RADIUS,
+  ENEMY_SOFT_AVOID_RADIUS,
+  isEnemyProximityThreat,
+} from './dodge-collision-world';
+export type { LocalDodgeCollisionSnapshot } from './dodge-collision-world';
+export {
+  DodgeJumpLimiter,
+  MAX_DODGE_JUMP_DISTANCE,
+  MIN_DODGE_JUMP_DISTANCE,
+} from './dodge-jump-limiter';
+export type { DodgeJumpLimiterState, DodgeJumpStatus } from './dodge-jump-limiter';
+export {
+  DODGE_COST_WEIGHTS,
+  SpaceTimeDodgePlanner,
+  sweptRelativeMotion,
+} from './dodge-trajectory-planner';
+export type {
+  DodgeFallback,
+  DodgeCostWeights,
+  DodgePlannerMetrics,
+  DodgePlannerOptions,
+  DodgePlanningAoe,
+  DodgePlanningEnvironment,
+  DodgePlanningInput,
+  DodgePlanningResult,
+  DodgeReplanReason,
+  DodgeTrajectory,
+  DodgeTrajectoryAssessment,
+  EmergencyJumpPlan,
+  TimedDodgeWaypoint,
+} from './dodge-trajectory-planner';
 export { PredictiveAutoDodgeController, ThrownAoeTracker } from './predictive-auto-dodge';
 export type {
   AutoDodgeAoeThreat,

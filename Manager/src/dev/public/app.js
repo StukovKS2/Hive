@@ -162,6 +162,8 @@
       'settings.viewer.selfProjectilesDesc': 'Load projectiles fired by the selected account.',
       'settings.viewer.otherProjectiles': 'Other projectiles',
       'settings.viewer.otherProjectilesDesc': 'Load enemy and other-player projectiles. Extra visual tracking stops when disabled.',
+      'settings.viewer.aoes': 'Area effects',
+      'settings.viewer.aoesDesc': 'Draw incoming AOE countdowns and recent impact radii.',
       'settings.viewer.pathfindingPath': 'Pathfinding path',
       'settings.viewer.pathfindingPathDesc': 'Draw the current vectorized navigation route.',
       'settings.viewer.dodgePath': 'Dodge path',
@@ -2043,6 +2045,18 @@
     var suf = buildGearExaltBonusSuffix(gearBonus, exaltBonus);
     return suf ? String(base) + ' ' + suf : String(base);
   }
+  function isPlayerStatMaxed(playerData, statKey) {
+    if (!playerData || !playerData.baseStats || !playerData.statMaxes) return false;
+    var base = Number(playerData.baseStats[statKey]);
+    var cap = Number(playerData.statMaxes[statKey]);
+    return Number.isFinite(base) && Number.isFinite(cap) && cap > 0 && base >= cap;
+  }
+  function setPlayerStatMaxed(element, playerData, statKey) {
+    if (element) element.classList.toggle('stat-maxed', isPlayerStatMaxed(playerData, statKey));
+  }
+  function playerStatMaxedClass(playerData, statKey) {
+    return isPlayerStatMaxed(playerData, statKey) ? ' stat-maxed' : '';
+  }
   let showServerPing = localStorage.getItem('showServerPing') !== 'false';
   let showAccountEmails = localStorage.getItem('showAccountEmails') !== 'false';
   var viewerSettings = {
@@ -2051,6 +2065,7 @@
     loadObjects: localStorage.getItem('viewerLoadObjects') !== 'false',
     selfProjectiles: localStorage.getItem('viewerSelfProjectiles') !== 'false',
     otherProjectiles: localStorage.getItem('viewerOtherProjectiles') !== 'false',
+    aoes: localStorage.getItem('viewerAoes') !== 'false',
     pathfindingPath: localStorage.getItem('viewerPathfindingPath') !== 'false',
     dodgePath: localStorage.getItem('viewerDodgePath') !== 'false',
     frameRate: localStorage.getItem('viewerFrameRate') === '60' ? 60 : 30,
@@ -3117,6 +3132,7 @@
   const viewerObjectsToggle = document.getElementById('setting-viewer-objects');
   const viewerSelfProjectilesToggle = document.getElementById('setting-viewer-self-projectiles');
   const viewerOtherProjectilesToggle = document.getElementById('setting-viewer-other-projectiles');
+  const viewerAoesToggle = document.getElementById('setting-viewer-aoes');
   const viewerPathfindingPathToggle = document.getElementById('setting-viewer-pathfinding-path');
   const viewerDodgePathToggle = document.getElementById('setting-viewer-dodge-path');
   const nearbyRefreshBtn = document.getElementById('nearby-refresh-btn');
@@ -4208,6 +4224,7 @@
     localStorage.setItem('viewerLoadObjects', viewerSettings.loadObjects ? 'true' : 'false');
     localStorage.setItem('viewerSelfProjectiles', viewerSettings.selfProjectiles ? 'true' : 'false');
     localStorage.setItem('viewerOtherProjectiles', viewerSettings.otherProjectiles ? 'true' : 'false');
+    localStorage.setItem('viewerAoes', viewerSettings.aoes ? 'true' : 'false');
     localStorage.setItem('viewerPathfindingPath', viewerSettings.pathfindingPath ? 'true' : 'false');
     localStorage.setItem('viewerDodgePath', viewerSettings.dodgePath ? 'true' : 'false');
     localStorage.setItem('viewerFrameRate', String(viewerSettings.frameRate));
@@ -4228,6 +4245,7 @@
     if (!viewerSettings.otherProjectiles) viewerOtherProjectileImages.clear();
     if (lastViewerData) {
       if (!viewerSettings.loadObjects) lastViewerData.objects = [];
+      if (!viewerSettings.aoes) lastViewerData.aoes = [];
       if (!viewerSettings.pathfindingPath) lastViewerData.pathfindingPath = [];
       if (!viewerSettings.dodgePath) lastViewerData.dodgePath = [];
       if (Array.isArray(lastViewerData.projectiles)) {
@@ -4264,6 +4282,7 @@
     [viewerObjectsToggle, 'loadObjects'],
     [viewerSelfProjectilesToggle, 'selfProjectiles'],
     [viewerOtherProjectilesToggle, 'otherProjectiles'],
+    [viewerAoesToggle, 'aoes'],
     [viewerPathfindingPathToggle, 'pathfindingPath'],
     [viewerDodgePathToggle, 'dodgePath'],
   ].forEach(function (entry) {
@@ -5828,14 +5847,17 @@
 
   function buildLiveEquipmentItemsFromPlayerData(pd) {
     var inventory = Array.isArray(pd && pd.inventory) ? pd.inventory : [];
+    var inventoryEnchantIds = Array.isArray(pd && pd.inventoryEnchantIds) ? pd.inventoryEnchantIds : [];
     var equipmentTokens = inventory.slice(0, 4);
     if (!equipmentTokens.length) return [];
-    return equipmentTokens.map(function (token) {
+    return equipmentTokens.map(function (token, slotIndex) {
       var objectType = -1;
       var uniqueId = null;
+      var enchantIds = inventoryEnchantIds[slotIndex];
       if (token && typeof token === 'object') {
         objectType = Number(token.objectType != null ? token.objectType : token.itemType);
         uniqueId = token.uniqueId != null ? String(token.uniqueId) : null;
+        if (Array.isArray(token.enchantIds)) enchantIds = token.enchantIds;
       } else {
         objectType = Number(token);
       }
@@ -5845,7 +5867,7 @@
         objectTypeHex: objectType >= 0 ? ('0x' + Number(objectType).toString(16)) : '',
         name: '',
         uniqueId: uniqueId,
-        enchantIds: [],
+        enchantIds: Array.isArray(enchantIds) ? enchantIds : [],
       };
     });
   }
@@ -6449,7 +6471,7 @@
     return 1;
   }
 
-  function normalizeMacPopoutInvSlot(raw) {
+  function normalizeMacPopoutInvSlot(raw, liveEnchantIds) {
     if (raw === undefined || raw === null) return { objectType: -1, objectTypeHex: '', name: '', enchantIds: [], uniqueId: null };
     var ot;
     if (raw && typeof raw === 'object') {
@@ -6462,7 +6484,9 @@
       objectType: ot,
       objectTypeHex: ot >= 0 ? ('0x' + ot.toString(16)) : '',
       name: '',
-      enchantIds: [],
+      enchantIds: raw && typeof raw === 'object' && Array.isArray(raw.enchantIds)
+        ? raw.enchantIds
+        : (Array.isArray(liveEnchantIds) ? liveEnchantIds : []),
       uniqueId: raw && typeof raw === 'object' && raw.uniqueId != null ? String(raw.uniqueId) : null,
     };
     return item;
@@ -6471,6 +6495,8 @@
   function buildMacPopoutLiveInventoryHtml(pd, runtimeElementId, showRuntime) {
     var inv = Array.isArray(pd && pd.inventory) ? pd.inventory : [];
     var bp = Array.isArray(pd && pd.backpack) ? pd.backpack : [];
+    var invEnchantIds = Array.isArray(pd && pd.inventoryEnchantIds) ? pd.inventoryEnchantIds : [];
+    var bpEnchantIds = Array.isArray(pd && pd.backpackEnchantIds) ? pd.backpackEnchantIds : [];
     var sdkTier = sdkBackpackTierFromPlayerData(pd);
 
     var html = '';
@@ -6480,7 +6506,7 @@
 
     var equip = [];
     var i = 0;
-    for (; i < 4; i++) equip.push(normalizeMacPopoutInvSlot(inv[i]));
+    for (; i < 4; i++) equip.push(normalizeMacPopoutInvSlot(inv[i], invEnchantIds[i]));
     html +=
       '<div class="mac-popout-inv-group">' +
       '<div class="mac-popout-equipment-heading">' +
@@ -6495,9 +6521,9 @@
       '</div>';
 
     var bagTop = [];
-    for (i = 4; i < 8; i++) bagTop.push(normalizeMacPopoutInvSlot(inv[i]));
+    for (i = 4; i < 8; i++) bagTop.push(normalizeMacPopoutInvSlot(inv[i], invEnchantIds[i]));
     var bagBot = [];
-    for (i = 8; i < 12; i++) bagBot.push(normalizeMacPopoutInvSlot(inv[i]));
+    for (i = 8; i < 12; i++) bagBot.push(normalizeMacPopoutInvSlot(inv[i], invEnchantIds[i]));
     var bagRowsHtml =
       '<div class="mac-popout-inv-bag-rows">' +
       '<div class="rotmg-item-strip mac-popout-inv-strip mac-popout-inv-strip--bag-row">' +
@@ -6515,7 +6541,7 @@
       for (var s = start; s < end; s += 4) {
         var rowSlots = [];
         for (var c = 0; c < 4 && s + c < end; c++) {
-          rowSlots.push(normalizeMacPopoutInvSlot(bp[s + c]));
+          rowSlots.push(normalizeMacPopoutInvSlot(bp[s + c], bpEnchantIds[s + c]));
         }
         parts +=
           '<div class="rotmg-item-strip mac-popout-inv-strip mac-popout-inv-strip--bag-row">' +
@@ -6650,6 +6676,7 @@
           ? pd.hpRegenPerSec + '/s'
           : '';
     }
+    setPlayerStatMaxed(hpMainEl && hpMainEl.closest('.bar-value'), pd, 'maxHP');
 
     if (mpFillEl) mpFillEl.style.width = mpPct + '%';
     if (mpMainEl) mpMainEl.textContent = mp + ' / ' + maxMp;
@@ -6660,18 +6687,20 @@
           ? pd.mpRegenPerSec + '/s'
           : '';
     }
+    setPlayerStatMaxed(mpMainEl && mpMainEl.closest('.bar-value'), pd, 'maxMP');
 
     var statPairs = [
-      ['mac-popout-stat-atk', pd.attack, pd.attackBonus, pd.exaltedAttack],
-      ['mac-popout-stat-def', pd.defense, pd.defenseBonus, pd.exaltedDefense],
-      ['mac-popout-stat-spd', pd.speed, pd.speedBonus, pd.exaltedSpeed],
-      ['mac-popout-stat-dex', pd.dexterity, pd.dexterityBonus, pd.exaltedDexterity],
-      ['mac-popout-stat-vit', pd.vitality, pd.vitalityBonus, pd.exaltedVitality],
-      ['mac-popout-stat-wis', pd.wisdom, pd.wisdomBonus, pd.exaltedWisdom],
+      ['mac-popout-stat-atk', 'attack', pd.attack, pd.attackBonus, pd.exaltedAttack],
+      ['mac-popout-stat-def', 'defense', pd.defense, pd.defenseBonus, pd.exaltedDefense],
+      ['mac-popout-stat-spd', 'speed', pd.speed, pd.speedBonus, pd.exaltedSpeed],
+      ['mac-popout-stat-dex', 'dexterity', pd.dexterity, pd.dexterityBonus, pd.exaltedDexterity],
+      ['mac-popout-stat-vit', 'vitality', pd.vitality, pd.vitalityBonus, pd.exaltedVitality],
+      ['mac-popout-stat-wis', 'wisdom', pd.wisdom, pd.wisdomBonus, pd.exaltedWisdom],
     ];
     statPairs.forEach(function (row) {
       var el = document.getElementById(row[0]);
-      if (el) el.textContent = formatPlayerStatLine(row[1], row[2], row[3]);
+      if (el) el.textContent = formatPlayerStatLine(row[2], row[3], row[4]);
+      setPlayerStatMaxed(el, pd, row[1]);
     });
 
     var setDtl = function (id, val) {
@@ -7247,6 +7276,7 @@
     if (hpMainEl) hpMainEl.textContent = hp + ' / ' + maxHp;
     if (hpBonusEl) hpBonusEl.textContent = buildGearExaltBonusSuffix(data.healthBonus, data.exaltedMaxHP);
     if (hpRegenEl) hpRegenEl.textContent = (data.hpRegenPerSec != null && data.hpRegenPerSec !== '') ? (data.hpRegenPerSec + '/s') : '';
+    setPlayerStatMaxed(document.getElementById('hp-text'), data, 'maxHP');
 
     // MP bar: center MP + bonus, right-align MP/s (still inside bar)
     const mp = data.mana || 0;
@@ -7259,13 +7289,21 @@
     if (mpMainEl) mpMainEl.textContent = mp + ' / ' + maxMp;
     if (mpBonusEl) mpBonusEl.textContent = buildGearExaltBonusSuffix(data.manaBonus, data.exaltedMaxMP);
     if (mpRegenEl) mpRegenEl.textContent = (data.mpRegenPerSec != null && data.mpRegenPerSec !== '') ? (data.mpRegenPerSec + '/s') : '';
+    setPlayerStatMaxed(document.getElementById('mp-text'), data, 'maxMP');
 
-    document.getElementById('stat-atk').textContent = formatPlayerStatLine(data.attack, data.attackBonus, data.exaltedAttack);
-    document.getElementById('stat-def').textContent = formatPlayerStatLine(data.defense, data.defenseBonus, data.exaltedDefense);
-    document.getElementById('stat-spd').textContent = formatPlayerStatLine(data.speed, data.speedBonus, data.exaltedSpeed);
-    document.getElementById('stat-dex').textContent = formatPlayerStatLine(data.dexterity, data.dexterityBonus, data.exaltedDexterity);
-    document.getElementById('stat-vit').textContent = formatPlayerStatLine(data.vitality, data.vitalityBonus, data.exaltedVitality);
-    document.getElementById('stat-wis').textContent = formatPlayerStatLine(data.wisdom, data.wisdomBonus, data.exaltedWisdom);
+    var playerStatRows = [
+      ['stat-atk', 'attack', data.attack, data.attackBonus, data.exaltedAttack],
+      ['stat-def', 'defense', data.defense, data.defenseBonus, data.exaltedDefense],
+      ['stat-spd', 'speed', data.speed, data.speedBonus, data.exaltedSpeed],
+      ['stat-dex', 'dexterity', data.dexterity, data.dexterityBonus, data.exaltedDexterity],
+      ['stat-vit', 'vitality', data.vitality, data.vitalityBonus, data.exaltedVitality],
+      ['stat-wis', 'wisdom', data.wisdom, data.wisdomBonus, data.exaltedWisdom],
+    ];
+    playerStatRows.forEach(function (row) {
+      var statElement = document.getElementById(row[0]);
+      if (statElement) statElement.textContent = formatPlayerStatLine(row[2], row[3], row[4]);
+      setPlayerStatMaxed(statElement, data, row[1]);
+    });
 
     // Details
     document.getElementById('detail-level').textContent = data.level || '--';
@@ -7335,6 +7373,7 @@
     if (hpMainEl) hpMainEl.textContent = '-- / --';
     if (hpBonusEl) hpBonusEl.textContent = '';
     if (hpRegenEl) hpRegenEl.textContent = '';
+    document.getElementById('hp-text')?.classList.remove('stat-maxed');
     document.getElementById('mp-bar').style.width = '0%';
     const mpMainEl = document.getElementById('mp-main');
     const mpBonusEl = document.getElementById('mp-bonus');
@@ -7342,8 +7381,11 @@
     if (mpMainEl) mpMainEl.textContent = '-- / --';
     if (mpBonusEl) mpBonusEl.textContent = '';
     if (mpRegenEl) mpRegenEl.textContent = '';
+    document.getElementById('mp-text')?.classList.remove('stat-maxed');
     ['atk','def','spd','dex','vit','wis'].forEach(s => {
-      document.getElementById('stat-' + s).textContent = '--';
+      var statElement = document.getElementById('stat-' + s);
+      statElement.textContent = '--';
+      statElement.classList.remove('stat-maxed');
     });
     ['level','stars','fame','guild','map','gameid','objectid','objecttype','pos','questtargetid','questtargettype','server'].forEach(function (d) {
       document.getElementById('detail-' + d).textContent = '--';
@@ -10193,22 +10235,22 @@
         '<div class="mac-popout-player-bars">' +
           '<div class="stat-bar"><div class="bar-label">HP</div><div class="bar-track hp-track">' +
             '<div class="bar-fill hp-fill" style="width:' + hpPct + '%"></div>' +
-            '<div class="bar-value bar-value-row"><div class="bar-value-center"><span>' + escapeHtml(hp + ' / ' + maxHp) + '</span><span class="bar-bonus">' + escapeHtml(buildGearExaltBonusSuffix(pd.healthBonus, pd.exaltedMaxHP)) + '</span></div>' +
+            '<div class="bar-value bar-value-row' + playerStatMaxedClass(pd, 'maxHP') + '"><div class="bar-value-center"><span>' + escapeHtml(hp + ' / ' + maxHp) + '</span><span class="bar-bonus">' + escapeHtml(buildGearExaltBonusSuffix(pd.healthBonus, pd.exaltedMaxHP)) + '</span></div>' +
             '<div class="bar-value-right">' + escapeHtml(pd.hpRegenPerSec != null && pd.hpRegenPerSec !== '' ? pd.hpRegenPerSec + '/s' : '') + '</div></div>' +
           '</div></div>' +
           '<div class="stat-bar"><div class="bar-label">MP</div><div class="bar-track mp-track">' +
             '<div class="bar-fill mp-fill" style="width:' + mpPct + '%"></div>' +
-            '<div class="bar-value bar-value-row"><div class="bar-value-center"><span>' + escapeHtml(mp + ' / ' + maxMp) + '</span><span class="bar-bonus">' + escapeHtml(buildGearExaltBonusSuffix(pd.manaBonus, pd.exaltedMaxMP)) + '</span></div>' +
+            '<div class="bar-value bar-value-row' + playerStatMaxedClass(pd, 'maxMP') + '"><div class="bar-value-center"><span>' + escapeHtml(mp + ' / ' + maxMp) + '</span><span class="bar-bonus">' + escapeHtml(buildGearExaltBonusSuffix(pd.manaBonus, pd.exaltedMaxMP)) + '</span></div>' +
             '<div class="bar-value-right">' + escapeHtml(pd.mpRegenPerSec != null && pd.mpRegenPerSec !== '' ? pd.mpRegenPerSec + '/s' : '') + '</div></div>' +
           '</div></div>' +
         '</div>' +
         '<div class="mac-popout-stats mac-popout-stats-grid">' +
-          '<div class="mini-stat"><span class="stat-icon">ATK</span><span class="stat-val">' + escapeHtml(formatPlayerStatLine(pd.attack, pd.attackBonus, pd.exaltedAttack)) + '</span></div>' +
-          '<div class="mini-stat"><span class="stat-icon">DEF</span><span class="stat-val">' + escapeHtml(formatPlayerStatLine(pd.defense, pd.defenseBonus, pd.exaltedDefense)) + '</span></div>' +
-          '<div class="mini-stat"><span class="stat-icon">SPD</span><span class="stat-val">' + escapeHtml(formatPlayerStatLine(pd.speed, pd.speedBonus, pd.exaltedSpeed)) + '</span></div>' +
-          '<div class="mini-stat"><span class="stat-icon">DEX</span><span class="stat-val">' + escapeHtml(formatPlayerStatLine(pd.dexterity, pd.dexterityBonus, pd.exaltedDexterity)) + '</span></div>' +
-          '<div class="mini-stat"><span class="stat-icon">VIT</span><span class="stat-val">' + escapeHtml(formatPlayerStatLine(pd.vitality, pd.vitalityBonus, pd.exaltedVitality)) + '</span></div>' +
-          '<div class="mini-stat"><span class="stat-icon">WIS</span><span class="stat-val">' + escapeHtml(formatPlayerStatLine(pd.wisdom, pd.wisdomBonus, pd.exaltedWisdom)) + '</span></div>' +
+          '<div class="mini-stat"><span class="stat-icon">ATK</span><span class="stat-val' + playerStatMaxedClass(pd, 'attack') + '">' + escapeHtml(formatPlayerStatLine(pd.attack, pd.attackBonus, pd.exaltedAttack)) + '</span></div>' +
+          '<div class="mini-stat"><span class="stat-icon">DEF</span><span class="stat-val' + playerStatMaxedClass(pd, 'defense') + '">' + escapeHtml(formatPlayerStatLine(pd.defense, pd.defenseBonus, pd.exaltedDefense)) + '</span></div>' +
+          '<div class="mini-stat"><span class="stat-icon">SPD</span><span class="stat-val' + playerStatMaxedClass(pd, 'speed') + '">' + escapeHtml(formatPlayerStatLine(pd.speed, pd.speedBonus, pd.exaltedSpeed)) + '</span></div>' +
+          '<div class="mini-stat"><span class="stat-icon">DEX</span><span class="stat-val' + playerStatMaxedClass(pd, 'dexterity') + '">' + escapeHtml(formatPlayerStatLine(pd.dexterity, pd.dexterityBonus, pd.exaltedDexterity)) + '</span></div>' +
+          '<div class="mini-stat"><span class="stat-icon">VIT</span><span class="stat-val' + playerStatMaxedClass(pd, 'vitality') + '">' + escapeHtml(formatPlayerStatLine(pd.vitality, pd.vitalityBonus, pd.exaltedVitality)) + '</span></div>' +
+          '<div class="mini-stat"><span class="stat-icon">WIS</span><span class="stat-val' + playerStatMaxedClass(pd, 'wisdom') + '">' + escapeHtml(formatPlayerStatLine(pd.wisdom, pd.wisdomBonus, pd.exaltedWisdom)) + '</span></div>' +
         '</div>' +
       '</div>' +
       '<div class="mac-popout-inventory-section">' +
@@ -10520,15 +10562,20 @@
     var previousProjectiles = lastViewerData && Array.isArray(lastViewerData.projectiles)
       ? lastViewerData.projectiles
       : [];
+    var previousAoes = lastViewerData && Array.isArray(lastViewerData.aoes)
+      ? lastViewerData.aoes
+      : [];
     lastViewerData = Object.assign({}, lastViewerData || {}, msg, {
       tiles: viewerSettings.loadTiles ? Array.from(viewerTileCache.values()) : [],
       objects: viewerSettings.loadObjects
         ? Array.from(viewerObjectTracks.values(), function (track) { return track.data; })
         : [],
       projectiles: Array.isArray(msg.projectiles) ? msg.projectiles : previousProjectiles,
+      aoes: Array.isArray(msg.aoes) ? msg.aoes : previousAoes,
       player: viewerPlayerTrack ? viewerPlayerTrack.data : null
     });
     if (!viewerSettings.selfProjectiles && !viewerSettings.otherProjectiles) lastViewerData.projectiles = [];
+    if (!viewerSettings.aoes) lastViewerData.aoes = [];
     updateViewerRenderPositions(now);
     if (activeTab === 'viewer') {
       renderViewer(now);
@@ -10802,6 +10849,69 @@
     return true;
   }
 
+  function drawViewerAoe(ctx, aoe, gameTime, centerX, centerY, screenCenterX, screenCenterY, tileSize) {
+    var worldX = Number(aoe.x);
+    var worldY = Number(aoe.y);
+    var radius = Number(aoe.radius);
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldY) || !Number.isFinite(radius) || radius <= 0) return false;
+    var x = screenCenterX + (worldX - centerX) * tileSize;
+    var y = screenCenterY + (worldY - centerY) * tileSize;
+    var radiusPx = radius * tileSize;
+    if (aoe.pending === true) {
+      var landingTime = Number(aoe.landingTime);
+      var remainingMs = landingTime - gameTime;
+      if (!Number.isFinite(landingTime) || remainingMs <= 0) return false;
+      var pulse = 0.5 + 0.5 * Math.sin(gameTime / 90);
+      var lineWidth = Math.max(1.5, Math.min(3, tileSize * 0.12));
+      var countdown = remainingMs >= 995
+        ? Math.ceil(remainingMs / 1000) + 's'
+        : (remainingMs / 1000).toFixed(1) + 's';
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(x, y, radiusPx, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,66,76,' + (0.08 + pulse * 0.05).toFixed(3) + ')';
+      ctx.fill();
+      ctx.setLineDash([Math.max(3, tileSize * 0.22), Math.max(2, tileSize * 0.14)]);
+      ctx.lineDashOffset = -gameTime / 55;
+      ctx.strokeStyle = 'rgba(255,77,87,' + (0.72 + pulse * 0.24).toFixed(3) + ')';
+      ctx.lineWidth = lineWidth;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = '600 ' + Math.max(10, Math.min(15, radiusPx * 0.55)) + 'px system-ui, sans-serif';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(8,12,18,0.92)';
+      ctx.strokeText(countdown, x, y);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(countdown, x, y);
+      ctx.restore();
+      return true;
+    }
+
+    var lifetime = Math.max(1, Number(aoe.lifetimeMs) || 750);
+    var elapsed = gameTime - Number(aoe.startTime);
+    if (elapsed < 0 || elapsed > lifetime) return false;
+    var packedColor = Number(aoe.color);
+    packedColor = Number.isFinite(packedColor) && packedColor !== -1 ? packedColor >>> 0 & 0xffffff : 0xef5a62;
+    var red = packedColor >>> 16 & 0xff;
+    var green = packedColor >>> 8 & 0xff;
+    var blue = packedColor & 0xff;
+    var fade = Math.max(0, 1 - elapsed / lifetime);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, radiusPx, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(' + red + ',' + green + ',' + blue + ',' + (0.08 + fade * 0.1).toFixed(3) + ')';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(' + red + ',' + green + ',' + blue + ',' + (0.35 + fade * 0.55).toFixed(3) + ')';
+    ctx.lineWidth = Math.max(1.5, Math.min(3, tileSize * 0.12));
+    ctx.stroke();
+    ctx.restore();
+    return true;
+  }
+
   function drawViewerPathOverlay(
     ctx,
     origin,
@@ -10950,6 +11060,16 @@
       }
     }
 
+    var gameTime = viewerEstimatedGameTime(now);
+    var visibleAoeCount = 0;
+    if (viewerSettings.aoes) {
+      (Array.isArray(data.aoes) ? data.aoes : []).forEach(function (aoe) {
+        if (drawViewerAoe(ctx, aoe, gameTime, centerX, centerY, screenCenterX, screenCenterY, tileSize)) {
+          visibleAoeCount++;
+        }
+      });
+    }
+
     if (viewerSettings.pathfindingPath) {
       drawViewerPathOverlay(
         ctx,
@@ -10987,7 +11107,6 @@
       if (hit) viewerObjectHits.push(hit);
     });
 
-    var gameTime = viewerEstimatedGameTime(now);
     var visibleProjectileCount = 0;
     (Array.isArray(data.projectiles) ? data.projectiles : []).forEach(function (projectile) {
       if (projectile.side === 'own' ? !viewerSettings.selfProjectiles : !viewerSettings.otherProjectiles) return;
@@ -11015,7 +11134,7 @@
     renderViewerHighlights();
 
     if (viewerStatus) {
-      viewerStatus.textContent = String(data.mapName || 'Unknown') + '  |  ' + Number(player.x).toFixed(2) + ', ' + Number(player.y).toFixed(2) + '  |  ' + viewerTileCache.size + ' tiles  |  ' + viewerObjects.length + ' objects  |  ' + visibleProjectileCount + ' projectiles';
+      viewerStatus.textContent = String(data.mapName || 'Unknown') + '  |  ' + Number(player.x).toFixed(2) + ', ' + Number(player.y).toFixed(2) + '  |  ' + viewerTileCache.size + ' tiles  |  ' + viewerObjects.length + ' objects  |  ' + visibleProjectileCount + ' projectiles  |  ' + visibleAoeCount + ' AOEs';
     }
   }
 
@@ -13126,6 +13245,7 @@
         includeObjects: viewerSettings.loadObjects,
         includeSelfProjectiles: viewerSettings.selfProjectiles,
         includeOtherProjectiles: viewerSettings.otherProjectiles,
+        includeAoes: viewerSettings.aoes,
         includePathfindingPath: viewerSettings.pathfindingPath,
         includeDodgePath: viewerSettings.dodgePath,
       }));

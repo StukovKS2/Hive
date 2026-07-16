@@ -30,6 +30,8 @@ export interface MovementVelocity {
 export interface MovementUpdateOptions {
   /** Integrate from locally predicted movement instead of the last server position. */
   integrateFromLocal?: boolean;
+  /** Instantly replaces local position; the client reports it in its next normal MOVE. */
+  positionOverride?: { x: number; y: number };
   /** Temporarily replaces navigation velocity without changing its target. */
   velocityOverride?: MovementVelocity;
   /** Continue target-progress stall detection while applying the override. */
@@ -70,14 +72,16 @@ export class MovementController {
   }
 
   update(snapshot: MovementSnapshot, dt: number, options: MovementUpdateOptions = {}): MovementUpdate {
-    if (!this.target && !options.velocityOverride) {
+    if (!this.target && !options.velocityOverride && !options.positionOverride) {
       return { pos: snapshot.localPos };
     }
-    const pos = options.velocityOverride
-      ? this.stepWithVelocity(snapshot, dt, options.velocityOverride, !!options.integrateFromLocal)
-      : this.stepToward(snapshot, dt, !!options.integrateFromLocal);
+    const pos = options.positionOverride
+      ? { ...options.positionOverride }
+      : options.velocityOverride
+        ? this.stepWithVelocity(snapshot, dt, options.velocityOverride, !!options.integrateFromLocal)
+        : this.stepToward(snapshot, dt, !!options.integrateFromLocal);
     if (!this.target) return { pos };
-    const stalled = options.velocityOverride && !options.trackTargetProgress
+    const stalled = (options.velocityOverride || options.positionOverride) && !options.trackTargetProgress
       ? undefined
       : this.detectStall(snapshot.serverPos, dt);
     const confirmedPos = snapshot.serverPos ?? pos;

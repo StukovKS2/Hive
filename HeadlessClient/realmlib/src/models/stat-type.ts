@@ -78,7 +78,8 @@ export enum StatType {
   MATERIAL_AMOUNT_STAT = 71,
   UNKNOWN_74 = 74, // always 1000
   MATERIAL_CAP_STAT = 72,
-  HASBACKPACK_STAT = 79,
+  /** Current wire HasBackpack flag. Stat 79 is PetType. */
+  HASBACKPACK_STAT = 75,
   /**
    * Item enchantment data (string stat). A comma-separated list with one entry
    * per equipment slot, each entry a base64url-encoded blob that begins
@@ -160,7 +161,6 @@ export enum StatType {
   // Resolved (RealmShark/ProdMafia). Values noted are from a level-1 seasonal
   // Rogue and a level-20 Wizard (cults capture).
   DISCOVERABLE_STAT = 23, // observed 1
-  UNKNOWN_75 = 75, // observed 0
   POWER_LEVEL_STAT = 124, // observed 151
   SHADER_STAT = 129, // observed -1
   BACKPACK_SLOTS_STAT = 130, // observed 0

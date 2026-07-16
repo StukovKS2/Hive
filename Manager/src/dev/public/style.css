@@ -1854,6 +1854,10 @@ body:not(.electron) #window-controls {
   font-family: 'Consolas', 'Courier New', monospace;
 }
 
+.stat-maxed {
+  color: var(--yellow) !important;
+}
+
 /* Player detail rows */
 #player-details {
   border-top: 1px solid var(--border);

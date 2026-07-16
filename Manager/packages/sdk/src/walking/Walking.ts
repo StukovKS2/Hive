@@ -4,6 +4,10 @@ import { Enemy } from '../types/entities/Enemy';
 export interface AutoDodgeOptions {
     /** Avoid tiles that deal ground damage. Defaults to true. */
     safeWalk?: boolean;
+    /** Allow adaptive MOVE-position jumps across projectile paths. Defaults to false. */
+    projectileJump?: boolean;
+    /** Requested jump ceiling in tiles. Clamped to 0.01-1.5. */
+    maxJumpDistance?: number;
 }
 
 export interface AutoDodgeState {
@@ -15,6 +19,19 @@ export interface AutoDodgeState {
     goal: { x: number; y: number } | null;
     /** Absolute points in the active short-horizon dodge route. */
     path: Array<{ x: number; y: number }>;
+    /** Position that will be reported in the next normal MOVE record. */
+    jumpTarget: { x: number; y: number } | null;
+    jumpDistance: number;
+    /** Distance currently permitted by recovery and learned server tolerance. */
+    jumpAllowance: number;
+    jumpStatus: 'ready' | 'recovering' | 'awaiting_move' | 'awaiting_confirmation' | 'backoff' | 'disabled';
+    /** Increments only when the local planner selects a new timed trajectory. */
+    planRevision: number;
+    /** True when the current frame kept the existing trajectory after validating it. */
+    planReused: boolean;
+    lastReplanAt: number | null;
+    /** Increments when projectile or AOE occupancy changes in the rolling danger field. */
+    dangerRevision: number;
     threatCount: number;
     earliestImpactMs: number | null;
     selectedCandidate: number;

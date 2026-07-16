@@ -24,6 +24,7 @@ import { RuntimeScheduler } from '../../util/RuntimeScheduler.js';
 import type { HeadlessChatMessage, HeadlessFleet, HeadlessSessionSummary } from '../../headless/HeadlessFleet.js';
 import {
   createProxyAgent,
+  parseEnchantments,
   parseProxyConfig,
   testProxy as testNetworkProxy,
   type PacketTraffic,
@@ -31,6 +32,16 @@ import {
   type ProxyProtocol,
 } from 'headless-client';
 import { getHiveDataDir, getHiveDocumentsDir } from '../../util/rotmgAssetExtractor.js';
+
+function liveEnchantIdsBySlot(raw: string | undefined, slotCount = 28): number[][] {
+  const result = Array.from({ length: slotCount }, () => [] as number[]);
+  for (const entry of parseEnchantments(raw)) {
+    if (entry.slot >= 0 && entry.slot < result.length) {
+      result[entry.slot] = [...entry.enchantmentTypeIds];
+    }
+  }
+  return result;
+}
 
 // ── Debug logging ─────────────────────────────────────────────────────────────
 const DEBUG_LOG_PATH = join(process.env.USERPROFILE || '', 'Documents', 'Hive', 'debug.log');
@@ -417,6 +428,7 @@ interface HeadlessViewerOptions {
   includeObjects: boolean;
   includeSelfProjectiles: boolean;
   includeOtherProjectiles: boolean;
+  includeAoes: boolean;
   includePathfindingPath: boolean;
   includeDodgePath: boolean;
 }
@@ -1691,6 +1703,7 @@ export class DevServer {
       if (this.connectedClients.size > 1) this.broadcastClientList();
       if (this.currentClient?.playerData) {
         const pd = this.currentClient.playerData;
+        const liveEnchantIds = liveEnchantIdsBySlot(pd.enchantmentsRaw);
         const clientId: string = this.currentClient.clientId || 'default';
         const sessionStats = this.getSessionStats(pd.currentFame);
         const serverIp = this.currentClient.state?.conTargetAddress || '';
@@ -1710,6 +1723,29 @@ export class DevServer {
         const effectiveObjectType = Number.isFinite(Number(liveObjectType)) && Number(liveObjectType) > 0
           ? Math.trunc(Number(liveObjectType))
           : (Number.isFinite(Number(pd.classType)) && Number(pd.classType) > 0 ? Math.trunc(Number(pd.classType)) : null);
+        const classStatMaxes = effectiveObjectType != null
+          ? this.gameData?.getPlayerClassStatMaxes(effectiveObjectType)
+          : undefined;
+        const statMaxes = classStatMaxes ? {
+          maxHP: classStatMaxes.maxHitPoints,
+          maxMP: classStatMaxes.maxMagicPoints,
+          attack: classStatMaxes.attack,
+          defense: classStatMaxes.defense,
+          speed: classStatMaxes.speed,
+          dexterity: classStatMaxes.dexterity,
+          vitality: classStatMaxes.hpRegen,
+          wisdom: classStatMaxes.mpRegen,
+        } : undefined;
+        const baseStats = {
+          maxHP: pd.maxHealth - pd.healthBonus - pd.exaltedMaxHP,
+          maxMP: pd.maxMana - pd.manaBonus - pd.exaltedMaxMP,
+          attack: pd.attack - pd.attackBonus - pd.exaltedAttack,
+          defense: pd.defense - pd.defenseBonus - pd.exaltedDefense,
+          speed: pd.speed - pd.speedBonus - pd.exaltedSpeed,
+          dexterity: pd.dexterity - pd.dexterityBonus - pd.exaltedDexterity,
+          vitality: pd.vitality - pd.vitalityBonus - pd.exaltedVitality,
+          wisdom: pd.wisdom - pd.wisdomBonus - pd.exaltedWisdom,
+        };
 
         let questTargetObjectType: number | null = null;
         const qOidRaw = pd.questObjectId;
@@ -1724,8 +1760,8 @@ export class DevServer {
           if (resolved != null && resolved > 0) questTargetObjectType = resolved;
         }
         // HP/MP regen formulas (same as RotmgPlayer): HP/s = 2*(1+0.12*VIT), MP/s = WIS/10
-        const totalVit = pd.vitality + pd.vitalityBonus + pd.exaltedVitality;
-        const totalWis = pd.wisdom + pd.wisdomBonus + pd.exaltedWisdom;
+        const totalVit = pd.vitality;
+        const totalWis = pd.wisdom;
         const hpRegenPerSec = Math.round((2 * (1 + 0.12 * totalVit)) * 10) / 10;
         const mpRegenPerSec = Math.round((totalWis / 10) * 10) / 10;
         const conditionEffects = Object.keys(ConditionEffect).filter((name) =>
@@ -1776,6 +1812,8 @@ export class DevServer {
           exaltedWisdom: pd.exaltedWisdom,
           exaltedMaxHP: pd.exaltedMaxHP,
           exaltedMaxMP: pd.exaltedMaxMP,
+          baseStats,
+          statMaxes,
           stars: pd.stars,
           fame: pd.currentFame,
           guild: pd.guildName || '',
@@ -1792,6 +1830,8 @@ export class DevServer {
           hasBackpackExtender: pd.hasBackpackExtender,
           inventory: Array.isArray(pd.inventory) ? pd.inventory.slice() : [],
           backpack: Array.isArray(pd.backpack) ? pd.backpack.slice() : [],
+          inventoryEnchantIds: liveEnchantIds.slice(0, 12),
+          backpackEnchantIds: liveEnchantIds.slice(12, 28),
           conditionEffects,
         });
         for (const client of this.wss.clients) {
@@ -2679,8 +2719,20 @@ export class DevServer {
       const client = this.headlessFleet?.get(session.accountId);
       const player = client?.getPlayer();
       const carried = player?.inventory ?? [];
+      const liveEnchantIds = liveEnchantIdsBySlot(player?.enchantmentsRaw);
       const totalVit = player?.vit ?? 0;
       const totalWis = player?.wis ?? 0;
+      const classStatMaxes = player ? this.gameData?.getPlayerClassStatMaxes(player.class) : undefined;
+      const statMaxes = classStatMaxes ? {
+        maxHP: classStatMaxes.maxHitPoints,
+        maxMP: classStatMaxes.maxMagicPoints,
+        attack: classStatMaxes.attack,
+        defense: classStatMaxes.defense,
+        speed: classStatMaxes.speed,
+        dexterity: classStatMaxes.dexterity,
+        vitality: classStatMaxes.hpRegen,
+        wisdom: classStatMaxes.mpRegen,
+      } : undefined;
       const fullData = player ? {
         name: player.name || session.alias,
         classType: player.class,
@@ -2697,30 +2749,41 @@ export class DevServer {
         maxHp: player.maxHP,
         mana: player.mp,
         maxMana: player.maxMP,
-        healthBonus: player.maxHPBoost,
-        manaBonus: player.maxMPBoost,
+        healthBonus: player.maxHPBoost - player.exaltedHP,
+        manaBonus: player.maxMPBoost - player.exaltedMP,
         hpRegenPerSec: Math.round((2 * (1 + 0.12 * totalVit)) * 10) / 10,
         mpRegenPerSec: Math.round((totalWis / 10) * 10) / 10,
         attack: player.atk,
-        attackBonus: player.atkBoost,
+        attackBonus: player.atkBoost - player.exaltedAtt,
         exaltedAttack: player.exaltedAtt,
         defense: player.def,
-        defenseBonus: player.defBoost,
+        defenseBonus: player.defBoost - player.exaltedDef,
         exaltedDefense: player.exaltedDef,
         speed: player.spd,
-        speedBonus: player.spdBoost,
+        speedBonus: player.spdBoost - player.exaltedSpd,
         exaltedSpeed: player.exaltedSpd,
         dexterity: player.dex,
-        dexterityBonus: player.dexBoost,
+        dexterityBonus: player.dexBoost - player.exaltedDex,
         exaltedDexterity: player.exaltedDex,
         vitality: player.vit,
-        vitalityBonus: player.vitBoost,
+        vitalityBonus: player.vitBoost - player.exaltedVit,
         exaltedVitality: player.exaltedVit,
         wisdom: player.wis,
-        wisdomBonus: player.wisBoost,
+        wisdomBonus: player.wisBoost - player.exaltedWis,
         exaltedWisdom: player.exaltedWis,
         exaltedMaxHP: player.exaltedHP,
         exaltedMaxMP: player.exaltedMP,
+        baseStats: {
+          maxHP: player.maxHP - player.maxHPBoost,
+          maxMP: player.maxMP - player.maxMPBoost,
+          attack: player.atk - player.atkBoost,
+          defense: player.def - player.defBoost,
+          speed: player.spd - player.spdBoost,
+          dexterity: player.dex - player.dexBoost,
+          vitality: player.vit - player.vitBoost,
+          wisdom: player.wis - player.wisBoost,
+        },
+        statMaxes,
         stars: player.stars,
         fame: player.currentFame,
         guild: player.guildName || '',
@@ -2732,6 +2795,8 @@ export class DevServer {
         backpackTier: player.backpackTier >= 16 ? 16 : player.hasBackpack ? 8 : 0,
         inventory: carried.slice(0, 12),
         backpack: carried.slice(12, 28),
+        inventoryEnchantIds: liveEnchantIds.slice(0, 12),
+        backpackEnchantIds: liveEnchantIds.slice(12, 28),
         conditionEffects: [],
       } : {
         name: session.alias,
@@ -3067,6 +3132,7 @@ export class DevServer {
             }]
         : []
       : undefined;
+    const aoes = options.includeAoes ? client.getViewerAoes() : undefined;
     return {
       mapName: client.getMapName(),
       center,
@@ -3074,6 +3140,7 @@ export class DevServer {
       tiles,
       objects,
       projectiles,
+      aoes,
       pathfindingPath,
       dodgePath,
       tickId: tick.tickId,
@@ -3126,6 +3193,7 @@ export class DevServer {
         tiles: subscription.includeTiles ? [] : undefined,
         objects: subscription.includeObjects ? [] : undefined,
         projectiles: subscription.includeSelfProjectiles || subscription.includeOtherProjectiles ? [] : undefined,
+        aoes: subscription.includeAoes ? [] : undefined,
         pathfindingPath: subscription.includePathfindingPath ? [] : undefined,
         dodgePath: subscription.includeDodgePath ? [] : undefined,
         player: null,
@@ -5186,6 +5254,7 @@ export class DevServer {
             includeObjects: msg.includeObjects !== false,
             includeSelfProjectiles: msg.includeSelfProjectiles !== false,
             includeOtherProjectiles: msg.includeOtherProjectiles !== false,
+            includeAoes: msg.includeAoes !== false,
             includePathfindingPath: msg.includePathfindingPath !== false,
             includeDodgePath: msg.includeDodgePath !== false,
             mapName: previous?.accountId === accountId ? previous.mapName : '',
