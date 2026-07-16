@@ -440,7 +440,7 @@ export function installHeadlessBridge(deps: BridgeDeps): void {
       Logger.warn('Walking', 'pathfindingWalkToCombatTarget: equipped weapon range is too short');
       return false;
     }
-    return client.combatPathfindingWalkTo({ x, y }, range);
+    return client.combatPathfindingWalkTo({ x, y }, range, options.targetId);
   };
   Walking.navigateToCombatTarget = (x: number, y: number, options = {}) => {
     const client = active(deps);

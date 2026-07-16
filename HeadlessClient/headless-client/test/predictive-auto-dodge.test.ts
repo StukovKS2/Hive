@@ -176,6 +176,87 @@ test('enabled auto-dodge owns safe movement and derives velocity from the goal',
   assert.equal(state.path.length, 2, 'straight time samples should collapse into one route vector');
 });
 
+test('rolling local goals reuse a plan when the global goal identity is stable', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true);
+  const movementIntent = {
+    mode: 'goal' as const,
+    goalX: 50,
+    goalY: 5,
+    goalId: 'realm-center',
+    arriveThreshold: 0.5,
+  };
+  let position = { x: 5, y: 5 };
+  let state = controller.evaluate({
+    time: 0,
+    playerId: 10,
+    position,
+    goal: { x: 10, y: 5 },
+    movementIntent,
+    routeRevision: 1,
+    moveSpeed: 0.004,
+    intentVelocity: { x: 0.004, y: 0 },
+    movementLeadMs: 16,
+    projectiles: [],
+    aoes: [],
+    environment: openEnvironment,
+  });
+
+  for (let frame = 1; frame <= 10; frame++) {
+    position = {
+      x: position.x + state.velocity.x * 112,
+      y: position.y + state.velocity.y * 112,
+    };
+    state = controller.evaluate({
+      time: frame * 112,
+      playerId: 10,
+      position,
+      goal: { x: position.x + 5, y: 5 },
+      movementIntent,
+      routeRevision: 1,
+      moveSpeed: 0.004,
+      intentVelocity: { x: 0.004, y: 0 },
+      movementLeadMs: 16,
+      projectiles: [],
+      aoes: [],
+      environment: openEnvironment,
+    });
+  }
+
+  assert.equal(state.planRevision, 2, 'only the horizon refresh should replace the original plan');
+});
+
+test('a logical goal id change immediately replaces the committed plan', () => {
+  const controller = new PredictiveAutoDodgeController();
+  controller.setEnabled(true);
+  const base = {
+    playerId: 10,
+    position: { x: 5, y: 5 },
+    goal: { x: 10, y: 5 },
+    routeRevision: 1,
+    moveSpeed: 0.004,
+    intentVelocity: { x: 0.004, y: 0 },
+    movementLeadMs: 16,
+    projectiles: [],
+    aoes: [],
+    environment: openEnvironment,
+  };
+  const initial = controller.evaluate({
+    ...base,
+    time: 0,
+    movementIntent: { mode: 'goal', goalX: 20, goalY: 5, goalId: 'one' },
+  });
+  const changed = controller.evaluate({
+    ...base,
+    time: 16,
+    movementIntent: { mode: 'goal', goalX: 20, goalY: 5, goalId: 'two' },
+  });
+
+  assert.equal(initial.planRevision, 1);
+  assert.equal(changed.planRevision, 2);
+  assert.equal(changed.planReused, false);
+});
+
 test('rolling planner replans only when a danger update invalidates the timed trajectory', () => {
   const controller = new PredictiveAutoDodgeController();
   controller.setEnabled(true);

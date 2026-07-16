@@ -1,4 +1,5 @@
 import { ENEMY_AVOID_RADIUS, isEnemyProximityThreat } from './dodge-collision-world';
+import type { DodgeMovementIntentId } from './dodge-movement-intent';
 
 export interface PathfindingDataProvider {
   getObject(type: number): {
@@ -36,6 +37,11 @@ export interface PathfindingStep {
   reached?: PathPoint;
   noPath?: boolean;
   replanned?: boolean;
+}
+
+export interface PathfindingIntentRevisions {
+  logicalRevision: number;
+  routeRevision: number;
 }
 
 interface GridPoint {
@@ -102,6 +108,10 @@ export class ExplorativePathfinder {
   private readonly combatEnemies = new Map<number, PathPoint>();
   private target: PathTarget | undefined;
   private combatRange: CombatPathfindingRange | undefined;
+  private goalId: DodgeMovementIntentId | undefined;
+  private combatTargetId: number | undefined;
+  private logicalIntentRevision = 0;
+  private routeRevision = 0;
   private plan: PlannedPath | undefined;
   private waypointIndex = 0;
   private revision = 0;
@@ -133,7 +143,7 @@ export class ExplorativePathfinder {
     this.invalidate();
   }
 
-  setTarget(target: PathPoint, threshold: number): boolean {
+  setTarget(target: PathPoint, threshold: number, goalId?: DodgeMovementIntentId): boolean {
     if (!Number.isFinite(target.x) || !Number.isFinite(target.y)
       || !Number.isFinite(threshold) || threshold < 0) {
       return false;
@@ -146,21 +156,29 @@ export class ExplorativePathfinder {
     if (!this.combatRange && this.target
       && this.target.x === target.x
       && this.target.y === target.y
-      && this.target.threshold === threshold) {
+      && this.target.threshold === threshold
+      && sameIntentId(this.goalId, goalId)) {
       return true;
     }
+
+    const sameLogicalIntent = !this.combatRange && !!this.target
+      && sameGoalIdentity(this.target, this.goalId, target, threshold, goalId);
+    if (!sameLogicalIntent) this.logicalIntentRevision++;
+    const routeChanged = !this.target
+      || this.combatRange !== undefined
+      || distance(this.target, target) >= GOAL_MATERIAL_CHANGE_DISTANCE
+      || Math.abs(this.target.threshold - threshold) > GOAL_THRESHOLD_CHANGE_TOLERANCE;
     this.combatRange = undefined;
+    this.combatTargetId = undefined;
+    this.goalId = goalId;
     this.target = { x: target.x, y: target.y, threshold };
-    this.plan = undefined;
-    this.waypointIndex = 0;
-    this.failedRevision = -1;
-    this.failedStartKey = '';
+    if (routeChanged) this.clearPlan();
     return true;
   }
 
-  setCombatTarget(target: PathPoint, range: CombatPathfindingRange): boolean {
+  setCombatTarget(target: PathPoint, range: CombatPathfindingRange, targetId = 0): boolean {
     if (!Number.isFinite(target.x) || !Number.isFinite(target.y)
-      || !validCombatRange(range)) {
+      || !validCombatRange(range) || !Number.isInteger(targetId) || targetId < 0) {
       return false;
     }
     const tileX = Math.floor(target.x);
@@ -169,26 +187,31 @@ export class ExplorativePathfinder {
 
     if (this.target && this.combatRange
       && sameCombatRange(this.combatRange, range)
+      && sameCombatIdentity(this.combatTargetId, targetId, this.target, target)
       && distance(this.target, target) < COMBAT_TARGET_REPLAN_DISTANCE) {
+      this.target = { x: target.x, y: target.y, threshold: INTERMEDIATE_THRESHOLD };
       return true;
     }
 
+    const sameLogicalIntent = !!this.target && !!this.combatRange
+      && sameCombatRange(this.combatRange, range)
+      && sameCombatIdentity(this.combatTargetId, targetId, this.target, target);
+    if (!sameLogicalIntent) this.logicalIntentRevision++;
     this.target = { x: target.x, y: target.y, threshold: INTERMEDIATE_THRESHOLD };
     this.combatRange = { ...range };
-    this.plan = undefined;
-    this.waypointIndex = 0;
-    this.failedRevision = -1;
-    this.failedStartKey = '';
+    this.goalId = undefined;
+    this.combatTargetId = targetId;
+    this.clearPlan();
     return true;
   }
 
   clearTarget(): void {
+    if (this.target) this.logicalIntentRevision++;
     this.target = undefined;
     this.combatRange = undefined;
-    this.plan = undefined;
-    this.waypointIndex = 0;
-    this.failedRevision = -1;
-    this.failedStartKey = '';
+    this.goalId = undefined;
+    this.combatTargetId = undefined;
+    this.clearPlan();
   }
 
   hasTarget(): boolean {
@@ -197,6 +220,13 @@ export class ExplorativePathfinder {
 
   getTarget(): PathTarget | undefined {
     return this.target ? { ...this.target } : undefined;
+  }
+
+  getIntentRevisions(): PathfindingIntentRevisions {
+    return {
+      logicalRevision: this.logicalIntentRevision,
+      routeRevision: this.routeRevision,
+    };
   }
 
   getRemainingPath(): PathPoint[] {
@@ -312,6 +342,7 @@ export class ExplorativePathfinder {
     }
     if (!this.plan || this.plan.revision !== this.revision) {
       this.plan = this.buildPlan(position, target);
+      this.routeRevision++;
       this.waypointIndex = 0;
       replanned = true;
     }
@@ -677,6 +708,13 @@ export class ExplorativePathfinder {
   private invalidate(): void {
     this.revision++;
   }
+
+  private clearPlan(): void {
+    this.plan = undefined;
+    this.waypointIndex = 0;
+    this.failedRevision = -1;
+    this.failedStartKey = '';
+  }
 }
 
 function appendBoundedWaypoints(
@@ -813,6 +851,39 @@ function sameCombatRange(a: CombatPathfindingRange, b: CombatPathfindingRange): 
   return a.minimumDistance === b.minimumDistance
     && a.preferredDistance === b.preferredDistance
     && a.maximumDistance === b.maximumDistance;
+}
+
+const GOAL_MATERIAL_CHANGE_DISTANCE = 0.5;
+const GOAL_THRESHOLD_CHANGE_TOLERANCE = 0.1;
+const LEGACY_COMBAT_IDENTITY_DISTANCE = 4;
+
+function sameIntentId(
+  a: DodgeMovementIntentId | undefined,
+  b: DodgeMovementIntentId | undefined,
+): boolean {
+  return a === b;
+}
+
+function sameGoalIdentity(
+  current: PathTarget,
+  currentId: DodgeMovementIntentId | undefined,
+  next: PathPoint,
+  nextThreshold: number,
+  nextId: DodgeMovementIntentId | undefined,
+): boolean {
+  if (currentId !== undefined || nextId !== undefined) return sameIntentId(currentId, nextId);
+  return distance(current, next) < GOAL_MATERIAL_CHANGE_DISTANCE
+    && Math.abs(current.threshold - nextThreshold) <= GOAL_THRESHOLD_CHANGE_TOLERANCE;
+}
+
+function sameCombatIdentity(
+  currentId: number | undefined,
+  nextId: number,
+  current: PathPoint,
+  next: PathPoint,
+): boolean {
+  if ((currentId ?? 0) > 0 || nextId > 0) return currentId === nextId;
+  return distance(current, next) < LEGACY_COMBAT_IDENTITY_DISTANCE;
 }
 
 function withinCombatRange(

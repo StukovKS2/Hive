@@ -119,6 +119,7 @@ export type {
   CombatPathfindingRange,
   PathfindingDataProvider,
   PathfindingStep,
+  PathfindingIntentRevisions,
   PathPoint,
   PathTarget,
 } from './explorative-pathfinder';

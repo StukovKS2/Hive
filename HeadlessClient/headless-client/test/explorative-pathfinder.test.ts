@@ -139,6 +139,40 @@ test('stall learning follows vector cells instead of the original A* staircase',
   assert.equal(hasTile(pathfinder, 1, 0), false);
 });
 
+test('pathfinder tracks logical intent separately from route rebuilds', () => {
+  const pathfinder = createPathfinder(30, 30);
+  assert.equal(pathfinder.setTarget({ x: 20.5, y: 20.5 }, 0.2, 'room:1'), true);
+  assert.deepEqual(pathfinder.getIntentRevisions(), { logicalRevision: 1, routeRevision: 0 });
+
+  pathfinder.next({ x: 0.5, y: 0.5 });
+  assert.deepEqual(pathfinder.getIntentRevisions(), { logicalRevision: 1, routeRevision: 1 });
+
+  assert.equal(pathfinder.setTarget({ x: 20.7, y: 20.5 }, 0.2, 'room:1'), true);
+  pathfinder.next({ x: 0.5, y: 0.5 });
+  assert.deepEqual(pathfinder.getIntentRevisions(), { logicalRevision: 1, routeRevision: 1 });
+
+  assert.equal(pathfinder.setTarget({ x: 20.7, y: 20.5 }, 0.2, 'room:2'), true);
+  pathfinder.next({ x: 0.5, y: 0.5 });
+  assert.deepEqual(pathfinder.getIntentRevisions(), { logicalRevision: 2, routeRevision: 1 });
+});
+
+test('combat target observations do not change logical identity', () => {
+  const pathfinder = createPathfinder(30, 30);
+  const range = { minimumDistance: 2.5, preferredDistance: 3, maximumDistance: 3.5 };
+  assert.equal(pathfinder.setCombatTarget({ x: 20, y: 20 }, range, 42), true);
+  pathfinder.next({ x: 0.5, y: 0.5 });
+  const initial = pathfinder.getIntentRevisions();
+
+  assert.equal(pathfinder.setCombatTarget({ x: 21, y: 20 }, range, 42), true);
+  pathfinder.next({ x: 0.5, y: 0.5 });
+  const moved = pathfinder.getIntentRevisions();
+  assert.equal(moved.logicalRevision, initial.logicalRevision);
+  assert.equal(moved.routeRevision, initial.routeRevision + 1);
+
+  assert.equal(pathfinder.setCombatTarget({ x: 21, y: 20 }, range, 43), true);
+  assert.equal(pathfinder.getIntentRevisions().logicalRevision, initial.logicalRevision + 1);
+});
+
 test('navigation waits for finite map bounds instead of reporting a false no-path result', () => {
   const pathfinder = new ExplorativePathfinder(data);
   assert.equal(pathfinder.setTarget({ x: 8.5, y: 1.5 }, 0.2), true);

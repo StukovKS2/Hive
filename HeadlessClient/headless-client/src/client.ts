@@ -586,9 +586,13 @@ export class Client extends EventEmitter {
   }
 
   /** Optimistically pathfinds toward a position using streamed map knowledge. */
-  pathfindingWalkTo(target: { x: number; y: number }, arriveThreshold = config.arriveThreshold): boolean {
+  pathfindingWalkTo(
+    target: { x: number; y: number },
+    arriveThreshold = config.arriveThreshold,
+    goalId?: DodgeMovementIntentId,
+  ): boolean {
     const wasPathfinding = this.pathfinder.hasTarget();
-    if (!this.pathfinder.setTarget(target, arriveThreshold)) {
+    if (!this.pathfinder.setTarget(target, arriveThreshold, goalId)) {
       return false;
     }
     // Script loops commonly refresh the same target. Preserve the active
@@ -603,7 +607,7 @@ export class Client extends EventEmitter {
     arriveThreshold = config.arriveThreshold,
     options: AutoDodgeOptions & { goalId?: DodgeMovementIntentId } = {},
   ): boolean {
-    if (!this.autoDodge || !this.pathfindingWalkTo(target, arriveThreshold)) return false;
+    if (!this.autoDodge || !this.pathfindingWalkTo(target, arriveThreshold, options.goalId)) return false;
     this.setDodgeMovementIntent({
       mode: 'goal',
       goalX: target.x,
@@ -619,9 +623,10 @@ export class Client extends EventEmitter {
   combatPathfindingWalkTo(
     target: { x: number; y: number },
     range: CombatPathfindingRange,
+    targetId = 0,
   ): boolean {
     const wasPathfinding = this.pathfinder.hasTarget();
-    if (!this.pathfinder.setCombatTarget(target, range)) return false;
+    if (!this.pathfinder.setCombatTarget(target, range, targetId)) return false;
     if (!wasPathfinding) this.movement.clear();
     return true;
   }
@@ -632,7 +637,8 @@ export class Client extends EventEmitter {
     range: CombatPathfindingRange,
     options: AutoDodgeOptions & { targetId?: number } = {},
   ): boolean {
-    if (!this.autoDodge || !this.combatPathfindingWalkTo(target, range)) return false;
+    if (!this.autoDodge
+      || !this.combatPathfindingWalkTo(target, range, options.targetId ?? 0)) return false;
     this.setDodgeMovementIntent({
       mode: 'combat_range',
       targetId: options.targetId ?? 0,
@@ -3238,6 +3244,7 @@ export class Client extends EventEmitter {
       const navigation = this.pathfinder.next(authoritativePos);
       if (navigation.reached) {
         this.movement.clear();
+        this.dodgeMovementIntent = null;
         console.log(`${this.tag} reached move target`);
         this.emit(ClientEvent.ReachedTarget, navigation.reached);
       } else if (!navigation.waypoint || navigation.waypointThreshold === undefined) {
@@ -3276,6 +3283,8 @@ export class Client extends EventEmitter {
           playerId: this.objectId,
           position: this.pos,
           goal: dodgeGoal,
+          movementIntent: this.dodgeMovementIntent,
+          routeRevision: this.pathfinder.getIntentRevisions().routeRevision,
           moveSpeed: movementSpeed(snapshot),
           intentVelocity,
           movementLeadMs: dt,

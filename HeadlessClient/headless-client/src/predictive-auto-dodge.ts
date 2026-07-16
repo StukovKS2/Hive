@@ -1,5 +1,9 @@
 import type { CombatProjectileSnapshot } from './combat-tracker';
 import {
+  cloneDodgeMovementIntent,
+  type DodgeMovementIntent,
+} from './dodge-movement-intent';
+import {
   SpaceTimeDodgePlanner,
   type DodgePlannerMetrics,
   type DodgePlannerOptions,
@@ -43,6 +47,9 @@ export interface AutoDodgeSnapshot {
   position: { x: number; y: number };
   /** Current bounded waypoint supplied by direct walking or global pathfinding. */
   goal?: { x: number; y: number; threshold?: number };
+  /** Stable global/script intent; `goal` remains the current local route point. */
+  movementIntent?: DodgeMovementIntent | null;
+  routeRevision?: number;
   /** Maximum movement speed in tiles per millisecond. */
   moveSpeed: number;
   intentVelocity: { x: number; y: number };
@@ -86,13 +93,17 @@ interface CommittedPlan {
   result: DodgePlanningResult;
   start: { x: number; y: number };
   goal: { x: number; y: number; threshold: number } | null;
+  intent: DodgeMovementIntent | null;
+  routeRevision: number;
 }
 
 const NORMAL_REPLAN_INTERVAL_MS = 100;
 const URGENT_REPLAN_INTERVAL_MS = 40;
 const MINIMUM_REMAINING_HORIZON_MS = 300;
 const TRAJECTORY_DRIFT_TOLERANCE = 0.45;
-const GOAL_CHANGE_TOLERANCE = 0.1;
+const GOAL_CHANGE_TOLERANCE = 0.5;
+const GOAL_DIRECTION_CHANGE_COSINE = Math.cos(12 * Math.PI / 180);
+const RANGE_CHANGE_TOLERANCE = 0.05;
 const COMMAND_LOOKAHEAD_MS = 60;
 const PLAN_SCORE_ABSOLUTE_GAIN = 0.35;
 const PLAN_SCORE_RELATIVE_GAIN = 0.08;
@@ -229,7 +240,10 @@ export class PredictiveAutoDodgeController {
       && environmentRevision !== this.lastEnvironmentRevision;
     this.lastEnvironmentRevision = environmentRevision;
     const goal = normalizedGoal(snapshot.goal);
-    const goalChanged = !sameGoal(goal, this.committed?.goal ?? null);
+    const intent = normalizedMovementIntent(snapshot, goal);
+    const intentChanged = !sameMovementIntent(intent, this.committed?.intent ?? null, snapshot.position);
+    const routeRevision = snapshot.routeRevision ?? 0;
+    const routeChanged = !!this.committed && routeRevision !== this.committed.routeRevision;
 
     if (snapshot.movementLocked || snapshot.moveSpeed <= 0) {
       if (this.committed) this.planner.recordTrajectoryInvalidation();
@@ -322,8 +336,8 @@ export class PredictiveAutoDodgeController {
       replanReason = urgentDue ? 'urgent' : null;
     } else if (drifted) {
       replanReason = 'normal';
-    } else if (goalChanged) {
-      replanReason = normalDue ? 'normal' : null;
+    } else if (intentChanged || routeChanged) {
+      replanReason = 'normal';
     } else if (remainingMs <= MINIMUM_REMAINING_HORIZON_MS || normalDue) {
       replanReason = 'normal';
     }
@@ -336,13 +350,20 @@ export class PredictiveAutoDodgeController {
       if (replanReason === 'urgent') this.lastUrgentPlanAt = snapshot.time;
       const forceReplace = !this.committed
         || currentUnsafe
-        || goalChanged
+        || intentChanged
+        || routeChanged
         || drifted
         || remainingMs <= MINIMUM_REMAINING_HORIZON_MS;
       const meaningfulGain = proposed.terminalScore + PLAN_SCORE_ABSOLUTE_GAIN
         < currentAssessmentScore * (1 - PLAN_SCORE_RELATIVE_GAIN);
       if (forceReplace || meaningfulGain) {
-        this.committed = { result: proposed, start: { ...snapshot.position }, goal };
+        this.committed = {
+          result: proposed,
+          start: { ...snapshot.position },
+          goal,
+          intent: cloneDodgeMovementIntent(intent),
+          routeRevision,
+        };
         this.planRevision++;
         this.lastReplanAt = snapshot.time;
         planReused = false;
@@ -764,10 +785,56 @@ function normalizedGoal(goal: AutoDodgeSnapshot['goal']): CommittedPlan['goal'] 
   };
 }
 
-function sameGoal(a: CommittedPlan['goal'], b: CommittedPlan['goal']): boolean {
+function normalizedMovementIntent(
+  snapshot: AutoDodgeSnapshot,
+  fallbackGoal: CommittedPlan['goal'],
+): DodgeMovementIntent | null {
+  if (snapshot.movementIntent) return cloneDodgeMovementIntent(snapshot.movementIntent);
+  if (!fallbackGoal) return null;
+  return {
+    mode: 'goal',
+    goalX: fallbackGoal.x,
+    goalY: fallbackGoal.y,
+    arriveThreshold: fallbackGoal.threshold,
+  };
+}
+
+function sameMovementIntent(
+  a: DodgeMovementIntent | null,
+  b: DodgeMovementIntent | null,
+  position: { x: number; y: number },
+): boolean {
   if (!a || !b) return a === b;
-  return Math.hypot(a.x - b.x, a.y - b.y) <= GOAL_CHANGE_TOLERANCE
-    && Math.abs(a.threshold - b.threshold) <= GOAL_CHANGE_TOLERANCE;
+  if (a.mode !== b.mode) return false;
+  if (a.mode === 'goal' && b.mode === 'goal') {
+    if ((a.goalId !== undefined || b.goalId !== undefined) && a.goalId !== b.goalId) return false;
+    if (Math.abs((a.arriveThreshold ?? 0) - (b.arriveThreshold ?? 0))
+      > RANGE_CHANGE_TOLERANCE) return false;
+    const destinationChange = Math.hypot(a.goalX - b.goalX, a.goalY - b.goalY);
+    if (destinationChange >= GOAL_CHANGE_TOLERANCE) return false;
+    const aDirection = unitDirection(position, { x: a.goalX, y: a.goalY });
+    const bDirection = unitDirection(position, { x: b.goalX, y: b.goalY });
+    return !aDirection || !bDirection
+      || aDirection.x * bDirection.x + aDirection.y * bDirection.y >= GOAL_DIRECTION_CHANGE_COSINE;
+  }
+  if (a.mode !== 'combat_range' || b.mode !== 'combat_range') return false;
+  const sameTarget = a.targetId > 0 || b.targetId > 0
+    ? a.targetId === b.targetId
+    : Math.hypot(a.targetX - b.targetX, a.targetY - b.targetY) < GOAL_CHANGE_TOLERANCE;
+  return sameTarget
+    && Math.abs(a.hardMinimumRange - b.hardMinimumRange) <= RANGE_CHANGE_TOLERANCE
+    && Math.abs(a.preferredMinimumRange - b.preferredMinimumRange) <= RANGE_CHANGE_TOLERANCE
+    && Math.abs(a.preferredMaximumRange - b.preferredMaximumRange) <= RANGE_CHANGE_TOLERANCE;
+}
+
+function unitDirection(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+): { x: number; y: number } | undefined {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  return length > 1e-9 ? { x: dx / length, y: dy / length } : undefined;
 }
 
 function projectileKey(projectile: CombatProjectileSnapshot): string {
