@@ -599,6 +599,35 @@ test('Client exposes no-path state, suspends goal dodge, and recovers after map 
   });
 });
 
+test('map invalidation keeps the active route while replacement search is still searching', () => {
+  const pathfinder = createPathfinder(30, 30);
+  const target = { x: 20.5, y: 20.5 };
+  pathfinder.setTarget(target, 0.2);
+
+  const initial = pathfinder.next({ x: 0.5, y: 0.5 });
+  assert.ok(initial.waypoint);
+  const activeWaypoint = { ...initial.waypoint! };
+  const remainingBefore = pathfinder.getRemainingPath();
+
+  pathfinder.observeTile(5, 5, BLOCKING_GROUND);
+  const incrementalBudget = { maxNodes: 1, maxMs: Number.POSITIVE_INFINITY };
+  const duringSearch = pathfinder.next({ x: 0.5, y: 0.5 }, incrementalBudget);
+  assert.equal(duringSearch.noPath, undefined);
+  assert.equal(duringSearch.replanned, false);
+  assert.deepEqual(duringSearch.waypoint, activeWaypoint);
+  assert.deepEqual(pathfinder.getRemainingPath(), remainingBefore);
+
+  let step = duringSearch;
+  let ticks = 0;
+  while (!step.replanned && ticks < 10_000) {
+    step = pathfinder.next({ x: 0.5, y: 0.5 }, incrementalBudget);
+    ticks++;
+  }
+  assert.equal(step.replanned, true);
+  assert.ok(step.waypoint);
+  assert.notDeepEqual(step.waypoint, activeWaypoint);
+});
+
 function createPathfinder(width: number, height: number): ExplorativePathfinder {
   const pathfinder = new ExplorativePathfinder(data);
   pathfinder.setMapBounds(width, height);

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { GOLDEN_PATHFINDING_CASES } from './fixtures/golden-pathfinding-cases';
 import {
-  BudgetFuzzIncrementalNotImplementedError,
   budgetFuzzInputFromGoldenCase,
   createProceduralBudgetFuzzInput,
   generateBudgetSliceSchedule,
@@ -13,7 +12,7 @@ import {
   runIncrementalWithBudgetSchedule,
 } from './helpers/pathfinding-budget-fuzz-harness';
 
-const INCREMENTAL_NOT_READY = 'Incremental budget-slice pathfinder not implemented until Commit 2/3';
+const INCREMENTAL_SKIPPED_BY_DEFAULT = 'Incremental comparison skipped by caller';
 const BASELINE_SCHEDULE_SEED = 0xb0d9_f00d;
 
 test('generateBudgetSliceSchedule is deterministic for the same seed', () => {
@@ -60,7 +59,7 @@ for (const testCase of GOLDEN_PATHFINDING_CASES) {
 
     assert.equal(result.caseId, testCase.id);
     assert.equal(result.incrementalSkipped, true);
-    assert.equal(result.skipReason, INCREMENTAL_NOT_READY);
+    assert.equal(result.skipReason, INCREMENTAL_SKIPPED_BY_DEFAULT);
     assert.equal(result.incremental, undefined);
     assert.ok(result.schedule.length > 0);
 
@@ -79,7 +78,6 @@ for (const testCase of GOLDEN_PATHFINDING_CASES) {
 
   test(
     `budget fuzz incremental matches sync: ${testCase.id}`,
-    { skip: INCREMENTAL_NOT_READY },
     () => {
       runBudgetFuzzCase(input, schedule, { skipIncremental: false });
     },
@@ -98,32 +96,29 @@ test('budget fuzz baseline smoke: procedural map from generator', () => {
 
   assert.equal(result.caseId, input.id);
   assert.equal(result.incrementalSkipped, true);
-  assert.equal(result.skipReason, INCREMENTAL_NOT_READY);
+  assert.equal(result.skipReason, INCREMENTAL_SKIPPED_BY_DEFAULT);
   assert.ok(result.schedule.length > 0);
   assert.equal(typeof result.baseline.noPath, 'boolean');
 });
 
-test(
-  'budget fuzz incremental matches sync: procedural map',
-  { skip: INCREMENTAL_NOT_READY },
-  () => {
-    const input = createProceduralBudgetFuzzInput(0xdec0_d002, {
-      width: 24,
-      height: 20,
-      blockDensity: 0.1,
-    });
-    const schedule = generateBudgetSliceSchedule({ seed: BASELINE_SCHEDULE_SEED });
-    runBudgetFuzzCase(input, schedule, { skipIncremental: false });
-  },
-);
+test('budget fuzz incremental matches sync: procedural map', () => {
+  const input = createProceduralBudgetFuzzInput(0xdec0_d002, {
+    width: 24,
+    height: 20,
+    blockDensity: 0.1,
+  });
+  const schedule = generateBudgetSliceSchedule({ seed: BASELINE_SCHEDULE_SEED });
+  runBudgetFuzzCase(input, schedule, { skipIncremental: false });
+});
 
-test('runIncrementalWithBudgetSchedule stub throws until Commit 2/3', () => {
-  const input = budgetFuzzInputFromGoldenCase(GOLDEN_PATHFINDING_CASES[0]!);
+test('runIncrementalWithBudgetSchedule matches sync baseline for open-horizontal', () => {
+  const testCase = GOLDEN_PATHFINDING_CASES.find((entry) => entry.id === 'open-horizontal')!;
+  const input = budgetFuzzInputFromGoldenCase(testCase);
   const schedule = generateBudgetSliceSchedule({ seed: 1 });
-  assert.throws(
-    () => runIncrementalWithBudgetSchedule(input, schedule),
-    (error: unknown) => error instanceof BudgetFuzzIncrementalNotImplementedError,
-  );
+  const baseline = runBudgetFuzzBaseline(input);
+  const incremental = runIncrementalWithBudgetSchedule(input, schedule);
+  assert.equal(incremental.noPath, baseline.noPath);
+  assert.deepEqual(incremental.rawPath, baseline.rawPath);
 });
 
 test('runBudgetFuzzBaseline matches golden runner for fixture inputs', () => {

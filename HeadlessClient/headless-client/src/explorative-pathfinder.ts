@@ -60,6 +60,16 @@ interface PlannedPath {
   revision: number;
 }
 
+/** Bumped in Commit 5 so stale no-path cache entries self-invalidate. */
+const NO_PATH_CACHE_SCHEMA_VERSION = 1;
+
+interface NoPathCacheEntry {
+  startKey: string;
+  goalCell: GridPoint;
+  mapVersion: number;
+  schemaVersion: number;
+}
+
 interface SegmentTrace {
   travelTiles: GridPoint[];
   corridorTiles: GridPoint[];
@@ -76,6 +86,16 @@ const INVALID_TILE_TYPE = 0xffff;
 const DIAGONAL_COST = Math.SQRT2;
 const INTERMEDIATE_THRESHOLD = 0.25;
 export const MAX_LOCAL_GOAL_DISTANCE = 5;
+/** Sync driver and tests: one-shot search with no clock reads. */
+export const SYNC_PATH_SEARCH_BUDGET: PathSearchStepBudget = {
+  maxNodes: Number.POSITIVE_INFINITY,
+  maxMs: Number.POSITIVE_INFINITY,
+};
+/** Per navigation tick: real time cap, generous node safety cap. */
+export const NAVIGATION_PATH_SEARCH_BUDGET: PathSearchStepBudget = {
+  maxNodes: Number.POSITIVE_INFINITY,
+  maxMs: 2,
+};
 const BLOCKED_TARGET_SEARCH_RADIUS = 4;
 const COMBAT_TARGET_REPLAN_DISTANCE = 0.35;
 const ENEMY_POSITION_REPLAN_DISTANCE = 0.25;
@@ -114,9 +134,18 @@ export class ExplorativePathfinder {
   private routeRevision = 0;
   private plan: PlannedPath | undefined;
   private waypointIndex = 0;
+  /** Monotonic passability revision; wired to PathSearch as mapVersion. */
   private revision = 0;
-  private failedRevision = -1;
-  private failedStartKey = '';
+  private noPathCache: NoPathCacheEntry | undefined;
+  /** Set by the most recent PathSearch run inside buildPlan. */
+  private lastSearchOpenSetExhausted = false;
+  /** In-flight raw-tile search; resume when start, goals, and mapVersion still match. */
+  private activePathSearch: ActivePathSearchState | undefined;
+  /** Raw tiles from the latest found search, awaiting assemblePlan on swap. */
+  private pendingRawTiles: GridPoint[] | undefined;
+  private goalSearchAttempts: GridPoint[][] | undefined;
+  private goalSearchAttemptIndex = 0;
+  private goalSearchSessionKey: string | undefined;
 
   constructor(private readonly data?: PathfindingDataProvider) {}
 
@@ -229,6 +258,11 @@ export class ExplorativePathfinder {
     };
   }
 
+  /** Passability revision bumped by terrain, objects, learned blocks, and map resets. */
+  getMapVersion(): number {
+    return this.revision;
+  }
+
   getRemainingPath(): PathPoint[] {
     return this.plan?.waypoints.slice(this.waypointIndex).map((point) => ({ ...point })) ?? [];
   }
@@ -315,7 +349,10 @@ export class ExplorativePathfinder {
     if (this.combatRange) this.invalidate();
   }
 
-  next(position: PathPoint): PathfindingStep {
+  next(
+    position: PathPoint,
+    searchBudget: PathSearchStepBudget = SYNC_PATH_SEARCH_BUDGET,
+  ): PathfindingStep {
     const target = this.target;
     if (!target) return {};
     // MAPINFO supplies finite bounds before navigation can prove reachability.
@@ -337,22 +374,40 @@ export class ExplorativePathfinder {
       this.plan = undefined;
       this.waypointIndex = 0;
     }
-    if (!this.plan && this.failedRevision === this.revision && this.failedStartKey === positionKey) {
+    const goalCell = this.resolveGoalCell(target);
+    if (!this.plan && this.matchesNoPathCache(positionKey, goalCell)) {
       return { noPath: true };
     }
     if (!this.plan || this.plan.revision !== this.revision) {
-      this.plan = this.buildPlan(position, target);
-      this.routeRevision++;
-      this.waypointIndex = 0;
-      replanned = true;
+      const searchStatus = this.advancePlanSearch(position, target, searchBudget);
+      if (searchStatus === 'found') {
+        const newPlan = this.consumePendingPlan(position, target);
+        if (newPlan) {
+          this.plan = newPlan;
+          this.routeRevision++;
+          this.waypointIndex = 0;
+          replanned = true;
+        } else if (!this.plan) {
+          if (this.lastSearchOpenSetExhausted) {
+            this.writeNoPathCache(positionKey, goalCell);
+          }
+          return { noPath: true, replanned: true };
+        }
+      } else if (searchStatus === 'no_path') {
+        if (!this.plan) {
+          if (this.lastSearchOpenSetExhausted) {
+            this.writeNoPathCache(positionKey, goalCell);
+          }
+          return { noPath: true, replanned: true };
+        }
+      } else if (!this.plan) {
+        return { replanned: true };
+      }
     }
     if (!this.plan) {
-      this.failedRevision = this.revision;
-      this.failedStartKey = positionKey;
-      return { noPath: true, replanned };
+      return { replanned };
     }
-    this.failedRevision = -1;
-    this.failedStartKey = '';
+    this.clearNoPathCache();
 
     while (this.waypointIndex < this.plan.waypoints.length) {
       const waypoint = this.plan.waypoints[this.waypointIndex]!;
@@ -376,16 +431,34 @@ export class ExplorativePathfinder {
 
   /**
    * Test-only incremental driver: resolves goals like buildPlan and runs PathSearch
-   * with step(budgetPerStep) until found/no_path.
+   * with step({ maxNodes, maxMs: Infinity }) until found/no_path.
+   * Pass a number for uniform maxNodes per step, or a schedule to vary maxNodes each step.
    */
   runPathSearchToCompletion(
     position: PathPoint,
-    budgetPerStep = Number.POSITIVE_INFINITY,
+    maxNodesPerStep: number | readonly number[] = Number.POSITIVE_INFINITY,
   ): GridPoint[] | undefined {
     const target = this.target;
     if (!target || this.width <= 0 || this.height <= 0) return undefined;
     const start = { x: Math.floor(position.x), y: Math.floor(position.y) };
-    return this.searchRawTiles(start, target, budgetPerStep);
+    return this.searchRawTiles(start, target, maxNodesPerStep);
+  }
+
+  /**
+   * Begin or resume a raw-tile search. Reuses the in-flight PathSearch when
+   * start, goals, and mapVersion are unchanged; otherwise starts a new search.
+   */
+  beginPathSearch(
+    start: GridPoint,
+    goals: ReadonlyArray<GridPoint>,
+  ): PathSearchHandle {
+    const search = this.acquirePathSearch(start, goals);
+    return new ActivePathSearchHandle(this, search);
+  }
+
+  /** Drops any in-flight search handle without retaining search state. */
+  cancelPathSearch(): void {
+    this.activePathSearch = undefined;
   }
 
   /** Learns the first unentered route cell as blocked after an authoritative movement stall. */
@@ -408,7 +481,111 @@ export class ExplorativePathfinder {
     return reached ? { reached } : {};
   }
 
-  private buildPlan(position: PathPoint, target: PathTarget): PlannedPath | undefined {
+  private advancePlanSearch(
+    position: PathPoint,
+    target: PathTarget,
+    budget: PathSearchStepBudget,
+  ): PathSearchStatus {
+    this.lastSearchOpenSetExhausted = false;
+    const start = { x: Math.floor(position.x), y: Math.floor(position.y) };
+    const sessionKey = this.planSearchSessionKey(start, target);
+    if (this.goalSearchSessionKey !== sessionKey) {
+      this.goalSearchSessionKey = sessionKey;
+      this.goalSearchAttempts = this.resolveGoalSearchAttempts(start, target);
+      this.goalSearchAttemptIndex = 0;
+      this.pendingRawTiles = undefined;
+      this.cancelPathSearch();
+    }
+
+    const attempts = this.goalSearchAttempts;
+    if (!attempts || attempts.length === 0) {
+      this.lastSearchOpenSetExhausted = true;
+      return 'no_path';
+    }
+
+    while (this.goalSearchAttemptIndex < attempts.length) {
+      const goals = attempts[this.goalSearchAttemptIndex]!;
+      if (goals.length === 0) {
+        this.pendingRawTiles = [];
+        return 'found';
+      }
+
+      const search = this.acquirePathSearch(start, goals);
+      const status = search.step(budget);
+      if (status === 'searching') {
+        return 'searching';
+      }
+      if (status === 'found') {
+        this.pendingRawTiles = search.getPath() ?? [];
+        this.releaseActivePathSearch(search);
+        return 'found';
+      }
+
+      this.lastSearchOpenSetExhausted = search.isOpenSetEmpty();
+      this.releaseActivePathSearch(search);
+      this.goalSearchAttemptIndex++;
+      if (this.goalSearchAttemptIndex >= attempts.length) {
+        this.clearGoalSearchSession();
+        return 'no_path';
+      }
+    }
+
+    this.clearGoalSearchSession();
+    return 'no_path';
+  }
+
+  private consumePendingPlan(position: PathPoint, target: PathTarget): PlannedPath | undefined {
+    const rawTiles = this.pendingRawTiles;
+    this.clearGoalSearchSession();
+    if (rawTiles === undefined) return undefined;
+    return this.assemblePlan(position, target, rawTiles);
+  }
+
+  private clearGoalSearchSession(): void {
+    this.goalSearchSessionKey = undefined;
+    this.goalSearchAttempts = undefined;
+    this.goalSearchAttemptIndex = 0;
+    this.pendingRawTiles = undefined;
+  }
+
+  private planSearchSessionKey(start: GridPoint, target: PathTarget): string {
+    if (this.combatRange) {
+      const goals = this.combatGoals(target, start, this.combatRange);
+      return `${tileKey(start.x, start.y)}|combat:${goalsKey(goals)}|${this.revision}`;
+    }
+    return `${tileKey(start.x, start.y)}|goal:${Math.floor(target.x)},${Math.floor(target.y)}|${this.revision}`;
+  }
+
+  private resolveGoalSearchAttempts(start: GridPoint, target: PathTarget): GridPoint[][] {
+    if (this.combatRange) {
+      const goals = this.combatGoals(target, start, this.combatRange);
+      return goals.length > 0 ? [goals] : [];
+    }
+
+    const goal = { x: Math.floor(target.x), y: Math.floor(target.y) };
+    if (this.isBlocked(goal.x, goal.y, start)) {
+      const attempts: GridPoint[][] = [];
+      for (let radius = 1; radius <= BLOCKED_TARGET_SEARCH_RADIUS; radius++) {
+        const goals = this.nearbyGoals(goal, start, radius);
+        if (goals.some((candidate) => candidate.x === start.x && candidate.y === start.y)) {
+          attempts.push([]);
+          return attempts;
+        }
+        if (goals.length > 0) attempts.push(goals);
+      }
+      return attempts;
+    }
+    if (goal.x === start.x && goal.y === start.y) {
+      return [[]];
+    }
+    return [[goal]];
+  }
+
+  private assemblePlan(
+    position: PathPoint,
+    target: PathTarget,
+    rawTiles: GridPoint[],
+  ): PlannedPath | undefined {
     const start = { x: Math.floor(position.x), y: Math.floor(position.y) };
     const combat = !!this.combatRange;
     let targetBlocked = false;
@@ -416,8 +593,6 @@ export class ExplorativePathfinder {
       const goal = { x: Math.floor(target.x), y: Math.floor(target.y) };
       targetBlocked = this.isBlocked(goal.x, goal.y, start);
     }
-    const rawTiles = this.searchRawTiles(start, target, Number.POSITIVE_INFINITY);
-    if (!rawTiles) return undefined;
     let waypoints: PathPoint[];
     if (rawTiles.length === 0) {
       waypoints = targetBlocked || combat ? [] : [{ x: target.x, y: target.y }];
@@ -619,11 +794,11 @@ export class ExplorativePathfinder {
   private searchRawTiles(
     start: GridPoint,
     target: PathTarget,
-    budgetPerStep: number,
+    maxNodesPerStep: number | readonly number[],
   ): GridPoint[] | undefined {
     if (this.combatRange) {
       const goals = this.combatGoals(target, start, this.combatRange);
-      if (goals.length > 0) return this.runPathSearch(start, goals, budgetPerStep);
+      if (goals.length > 0) return this.runPathSearch(start, goals, maxNodesPerStep);
       return undefined;
     }
 
@@ -635,7 +810,7 @@ export class ExplorativePathfinder {
           return [];
         }
         if (goals.length > 0) {
-          const result = this.runPathSearch(start, goals, budgetPerStep);
+          const result = this.runPathSearch(start, goals, maxNodesPerStep);
           if (result) return result;
         }
       }
@@ -644,22 +819,72 @@ export class ExplorativePathfinder {
     if (goal.x === start.x && goal.y === start.y) {
       return [];
     }
-    return this.runPathSearch(start, [goal], budgetPerStep);
+    return this.runPathSearch(start, [goal], maxNodesPerStep);
   }
 
   private runPathSearch(
     start: GridPoint,
     goals: GridPoint[],
-    budgetPerStep: number,
+    maxNodesPerStep: number | readonly number[],
   ): GridPoint[] | undefined {
+    const search = this.acquirePathSearch(start, goals);
+    const unlimited = { maxNodes: Number.POSITIVE_INFINITY, maxMs: Number.POSITIVE_INFINITY };
+    if (typeof maxNodesPerStep === 'number') {
+      const budget = maxNodesPerStep === Number.POSITIVE_INFINITY
+        ? unlimited
+        : { maxNodes: maxNodesPerStep, maxMs: Number.POSITIVE_INFINITY };
+      while (search.step(budget) === 'searching') {}
+    } else {
+      let scheduleIndex = 0;
+      while (search.step({
+        maxNodes: maxNodesPerStep[scheduleIndex % maxNodesPerStep.length]!,
+        maxMs: Number.POSITIVE_INFINITY,
+      }) === 'searching') {
+        scheduleIndex++;
+      }
+    }
+    this.lastSearchOpenSetExhausted = search.getStatus() === 'no_path';
+    const path = search.getPath();
+    if (search.getStatus() !== 'searching') {
+      this.releaseActivePathSearch(search);
+    }
+    return path;
+  }
+
+  private acquirePathSearch(
+    start: GridPoint,
+    goals: ReadonlyArray<GridPoint>,
+  ): PathSearch {
+    const goalKey = goalsKey(goals);
+    const mapVersion = this.revision;
+    const active = this.activePathSearch;
+    if (active
+      && active.start.x === start.x
+      && active.start.y === start.y
+      && active.goalKey === goalKey
+      && active.mapVersion === mapVersion
+      && active.search.getStatus() === 'searching') {
+      return active.search;
+    }
+
     const search = new PathSearch({
       start,
       goals,
       isPathBlocked: (x, y, s) => this.isPathBlocked(x, y, s),
-      mapVersion: this.revision,
+      mapVersion,
     });
-    while (search.step(budgetPerStep) === 'searching') {}
-    return search.getPath();
+    this.activePathSearch = { search, start: { ...start }, goalKey, mapVersion };
+    return search;
+  }
+
+  releaseActivePathSearch(search: PathSearch): void {
+    if (this.activePathSearch?.search === search) {
+      this.activePathSearch = undefined;
+    }
+  }
+
+  isActivePathSearch(search: PathSearch): boolean {
+    return this.activePathSearch?.search === search;
   }
 
   private isBlocked(x: number, y: number, start?: GridPoint): boolean {
@@ -710,15 +935,94 @@ export class ExplorativePathfinder {
     this.revision++;
   }
 
+  private resolveGoalCell(target: PathTarget): GridPoint {
+    return { x: Math.floor(target.x), y: Math.floor(target.y) };
+  }
+
+  private matchesNoPathCache(startKey: string, goalCell: GridPoint): boolean {
+    const cache = this.noPathCache;
+    return cache !== undefined
+      && cache.startKey === startKey
+      && cache.goalCell.x === goalCell.x
+      && cache.goalCell.y === goalCell.y
+      && cache.mapVersion === this.revision
+      && cache.schemaVersion === NO_PATH_CACHE_SCHEMA_VERSION;
+  }
+
+  private writeNoPathCache(startKey: string, goalCell: GridPoint): void {
+    this.noPathCache = {
+      startKey,
+      goalCell: { ...goalCell },
+      mapVersion: this.revision,
+      schemaVersion: NO_PATH_CACHE_SCHEMA_VERSION,
+    };
+  }
+
+  private clearNoPathCache(): void {
+    this.noPathCache = undefined;
+  }
+
   private clearPlan(): void {
     this.plan = undefined;
     this.waypointIndex = 0;
-    this.failedRevision = -1;
-    this.failedStartKey = '';
+    this.clearNoPathCache();
+    this.clearGoalSearchSession();
+    this.cancelPathSearch();
   }
 }
 
-type PathSearchStatus = 'searching' | 'found' | 'no_path';
+export type PathSearchStatus = 'searching' | 'found' | 'no_path';
+
+export interface PathSearchStepBudget {
+  maxNodes: number;
+  maxMs: number;
+}
+
+export interface PathSearchHandle {
+  status(): PathSearchStatus;
+  step(budget: PathSearchStepBudget): PathSearchStatus;
+  cancel(): void;
+  getPath(): ReadonlyArray<{ x: number; y: number }> | undefined;
+}
+
+interface ActivePathSearchState {
+  search: PathSearch;
+  start: GridPoint;
+  goalKey: string;
+  mapVersion: number;
+}
+
+class ActivePathSearchHandle implements PathSearchHandle {
+  constructor(
+    private readonly pathfinder: ExplorativePathfinder,
+    private readonly search: PathSearch,
+  ) {}
+
+  status(): PathSearchStatus {
+    return this.search.getStatus();
+  }
+
+  step(budget: PathSearchStepBudget): PathSearchStatus {
+    const status = this.search.step(budget);
+    if (status !== 'searching') {
+      this.pathfinder.releaseActivePathSearch(this.search);
+    }
+    return status;
+  }
+
+  cancel(): void {
+    if (this.pathfinder.isActivePathSearch(this.search)) {
+      this.pathfinder.cancelPathSearch();
+    }
+  }
+
+  getPath(): GridPoint[] | undefined {
+    return this.search.getPath();
+  }
+}
+
+/** Non-stale heap pops between performance.now() checks (64 ≈ 2×32, fewer syscalls). */
+const EXPANSIONS_PER_CLOCK_CHECK = 64;
 
 interface PathSearchParams {
   start: GridPoint;
@@ -757,17 +1061,40 @@ class PathSearch {
     this.open.push({ ...this.start, g: 0, h: startH, f: startH, order: this.order++ });
   }
 
-  step(budget: number): PathSearchStatus {
-    void budget;
+  /**
+   * Advance search until found, exhausted, or either per-call budget cap is reached.
+   * Stops when maxNodes non-stale expansions or maxMs elapses (whichever first).
+   * Infinity maxMs skips all performance.now() reads; terminal results beat budget caps.
+   */
+  step(budget: PathSearchStepBudget): PathSearchStatus {
     if (this.status !== 'searching') {
       return this.status;
+    }
+
+    const { maxNodes, maxMs } = budget;
+    const checkClock = Number.isFinite(maxMs);
+    const checkNodes = Number.isFinite(maxNodes);
+    let nonStaleExpansionsThisStep = 0;
+    let stepStartTime = 0;
+
+    if (checkClock) {
+      stepStartTime = performance.now();
+      if (performance.now() - stepStartTime >= maxMs) {
+        return 'searching';
+      }
+    }
+    if (checkNodes && maxNodes <= 0) {
+      return 'searching';
     }
 
     while (this.open.size > 0) {
       const current = this.open.pop()!;
       const currentKey = tileKey(current.x, current.y);
       if (current.g !== this.bestG.get(currentKey)) continue;
+
       this.expansions++;
+      nonStaleExpansionsThisStep++;
+
       if (this.goalKeys.has(currentKey)) {
         this.resultPath = reconstruct(currentKey, this.startKey, this.cameFrom, this.points);
         this.status = 'found';
@@ -793,6 +1120,15 @@ class PathSearch {
         this.points.set(key, point);
         this.open.push({ ...point, g, h, f: g + h, order: this.order++ });
       }
+
+      if (checkNodes && nonStaleExpansionsThisStep >= maxNodes) {
+        return 'searching';
+      }
+      if (checkClock && nonStaleExpansionsThisStep % EXPANSIONS_PER_CLOCK_CHECK === 0) {
+        if (performance.now() - stepStartTime >= maxMs) {
+          return 'searching';
+        }
+      }
     }
     this.status = 'no_path';
     return 'no_path';
@@ -802,9 +1138,28 @@ class PathSearch {
     return this.status;
   }
 
+  /** Snapshot of ExplorativePathfinder revision at construction; compared on resume in 3.5. */
+  getMapVersion(): number {
+    return this.mapVersion;
+  }
+
+  /** True only after the open set is fully exhausted (never on budget yield). */
+  isOpenSetEmpty(): boolean {
+    return this.open.size === 0;
+  }
+
   getPath(): GridPoint[] | undefined {
     return this.status === 'found' ? this.resultPath : undefined;
   }
+
+  /** Non-stale node expansions so far (test + resume verification). */
+  getExpansionCount(): number {
+    return this.expansions;
+  }
+}
+
+function goalsKey(goals: ReadonlyArray<GridPoint>): string {
+  return goals.map((goal) => tileKey(goal.x, goal.y)).sort().join('|');
 }
 
 function appendBoundedWaypoints(

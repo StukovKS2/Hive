@@ -11,7 +11,7 @@ import { createPathfinderFromFixture } from './pathfinding-map-generator';
 export type PathfindingEquivalenceResult = GoldenPathResult;
 
 export interface IncrementalPathfinderRunOptions {
-  /** Per-step expansion budget when driving incremental search (Commit 3). */
+  /** Per-step maxNodes cap when driving incremental search (maxMs stays Infinity until 3.6). */
   budgetPerStep?: number;
 }
 
@@ -20,7 +20,7 @@ export function runSyncBaseline(testCase: GoldenPathfindingCase): PathfindingEqu
   return runGoldenPathfindingCase(testCase);
 }
 
-/** Incremental PathSearch driver: loop step(budget) until found/no_path. */
+/** Incremental PathSearch driver: loop step({ maxNodes, maxMs: Infinity }) until found/no_path. */
 export function runIncrementalToCompletion(
   testCase: GoldenPathfindingCase,
   options?: IncrementalPathfinderRunOptions,

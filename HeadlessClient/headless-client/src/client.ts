@@ -96,6 +96,7 @@ import { ClientEvent } from './events';
 import {
   ExplorativePathfinder,
   MAX_LOCAL_GOAL_DISTANCE,
+  NAVIGATION_PATH_SEARCH_BUDGET,
   type CombatPathfindingRange,
 } from './explorative-pathfinder';
 import { DodgeCollisionWorld, ENEMY_AVOID_RADIUS } from './dodge-collision-world';
@@ -3330,7 +3331,7 @@ export class Client extends EventEmitter {
     const usingPathfinding = this.pathfinder.hasTarget();
     if (usingPathfinding) {
       const authoritativePos = this.serverPos ?? this.pos;
-      const navigation = this.pathfinder.next(authoritativePos);
+      const navigation = this.pathfinder.next(authoritativePos, NAVIGATION_PATH_SEARCH_BUDGET);
       if (navigation.reached) {
         this.movement.clear();
         this.dodgeMovementIntent = null;

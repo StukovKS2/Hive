@@ -11,7 +11,7 @@ import {
   serializePathfindingMapFixture,
   UNREACHABLE_POCKET_512_SEED,
 } from './helpers/pathfinding-map-generator';
-import { ExplorativePathfinder } from '../src/explorative-pathfinder';
+import { ExplorativePathfinder, NAVIGATION_PATH_SEARCH_BUDGET } from '../src/explorative-pathfinder';
 
 test('generatePathfindingMap is deterministic for the same seed', () => {
   const options = {
@@ -100,4 +100,25 @@ test('512×512 unreachable pocket reports no path after the search completes', (
   assert.equal(result.noPath, true);
   assert.equal(result.replanned, true);
   assert.equal(pathfinder.hasTarget(), true);
+});
+
+test('512×512 unreachable pocket does not finish in one incremental navigation tick', () => {
+  const fixture = createUnreachablePocket512Fixture();
+  const pathfinder = createPathfinderFromFixture(fixture);
+
+  pathfinder.setTarget(fixture.goal, 0.2);
+  const first = pathfinder.next(fixture.start, NAVIGATION_PATH_SEARCH_BUDGET);
+
+  assert.equal(first.noPath, undefined);
+  assert.equal(first.waypoint, undefined);
+  assert.equal(pathfinder.hasTarget(), true);
+
+  let result = first;
+  let ticks = 0;
+  while (!result.noPath && ticks < 100_000) {
+    result = pathfinder.next(fixture.start, NAVIGATION_PATH_SEARCH_BUDGET);
+    ticks++;
+  }
+  assert.equal(result.noPath, true);
+  assert.ok(ticks > 1, 'incremental search must span multiple navigation ticks');
 });

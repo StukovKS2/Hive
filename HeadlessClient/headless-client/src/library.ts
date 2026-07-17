@@ -118,13 +118,19 @@ export type {
   DodgeReplanCause,
   DodgeSafetyState,
 } from './predictive-auto-dodge';
-export { ExplorativePathfinder } from './explorative-pathfinder';
+export {
+  ExplorativePathfinder,
+  MAX_LOCAL_GOAL_DISTANCE,
+  NAVIGATION_PATH_SEARCH_BUDGET,
+  SYNC_PATH_SEARCH_BUDGET,
+} from './explorative-pathfinder';
 export type {
   CombatPathfindingRange,
   PathfindingDataProvider,
   PathfindingStep,
   PathfindingIntentRevisions,
   PathPoint,
+  PathSearchStepBudget,
   PathTarget,
 } from './explorative-pathfinder';
 export { AutoCombatController } from './auto-combat';

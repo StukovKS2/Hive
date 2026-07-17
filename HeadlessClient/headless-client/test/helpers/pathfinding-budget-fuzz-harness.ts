@@ -10,11 +10,12 @@ import type { GoldenPathResult } from './golden-pathfinding-runner';
 import { runGoldenPathfindingCase } from './golden-pathfinding-runner';
 import {
   generatePathfindingMap,
+  createPathfinderFromFixture,
   type GeneratePathfindingMapOptions,
   type PathfindingMapFixture,
 } from './pathfinding-map-generator';
 
-/** Per-step expansion budgets for incremental step(budget) driving (Commit 3). */
+/** Per-step maxNodes caps for incremental step({ maxNodes, maxMs: Infinity }) driving. */
 export type BudgetSliceSchedule = number[];
 
 export interface BudgetFuzzPathfindingInput {
@@ -146,19 +147,39 @@ export function runBudgetFuzzBaseline(input: BudgetFuzzPathfindingInput): Golden
 }
 
 /**
- * Stub for future incremental driver: loop step(budget) over `schedule` until
+ * Incremental driver: loop step({ maxNodes: schedule[i], maxMs: Infinity }) until
  * found/no_path, then return the same shape as runBudgetFuzzBaseline().
  */
 export function runIncrementalWithBudgetSchedule(
-  _input: BudgetFuzzPathfindingInput,
-  _schedule: BudgetSliceSchedule,
+  input: BudgetFuzzPathfindingInput,
+  schedule: BudgetSliceSchedule,
 ): GoldenPathResult {
-  throw new BudgetFuzzIncrementalNotImplementedError();
+  assert.ok(schedule.length > 0, 'schedule must contain at least one maxNodes cap');
+  const pathfinder = createPathfinderFromFixture(input.fixture);
+
+  if (input.mode === 'combat') {
+    const combat = input.combat!;
+    pathfinder.setCombatTarget(combat.target, combat.range, combat.primaryEnemyId);
+  } else {
+    pathfinder.setTarget(input.fixture.goal, 0.2);
+  }
+
+  if (input.setup === 'learned-blocked-at-start') {
+    pathfinder.next(input.fixture.start);
+    pathfinder.reportStall(input.fixture.start);
+  }
+
+  const rawTiles = pathfinder.runPathSearchToCompletion(input.fixture.start, schedule);
+  return {
+    rawPath: rawTiles ?? [],
+    noPath: rawTiles === undefined,
+    replanned: false,
+  };
 }
 
 /**
- * Given fixture input + budget schedule: run sync baseline, optionally run
- * incremental stub, assert equal. Default mode skips incremental until Commit 3.
+ * Given fixture input + maxNodes schedule: run sync baseline, optionally run
+ * incremental driver with step({ maxNodes, maxMs: Infinity }), assert equal.
  */
 export function runBudgetFuzzCase(
   input: BudgetFuzzPathfindingInput,
@@ -174,7 +195,7 @@ export function runBudgetFuzzCase(
       schedule,
       baseline,
       incrementalSkipped: true,
-      skipReason: 'Incremental budget-slice pathfinder not implemented until Commit 2/3',
+      skipReason: 'Incremental comparison skipped by caller',
     };
   }
 
