@@ -244,6 +244,15 @@ export class Walking {
         throw new Error('Must be run inside Hive client');
     }
 
+    /**
+     * Navigate into the Vault from anywhere.
+     *
+     * - Already in Vault: no-op.
+     * - In Nexus: walk to the vault portal and enter.
+     * - Elsewhere: escape to Nexus (keeping vault intent), then enter the vault.
+     *
+     * Safe to call repeatedly while waiting for map transitions.
+     */
     static enterVault(): void { throw new Error('Must be run inside Hive client'); }
     static enterPetYard(): void { throw new Error('Must be run inside Hive client'); }
     static enterGuildHall(): void { throw new Error('Must be run inside Hive client'); }

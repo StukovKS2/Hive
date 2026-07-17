@@ -62,6 +62,22 @@ export class Self {
         throw new Error('Must be run inside Hive client');
     }
 
+    /**
+     * Whether the character has a backpack unlocked (usable bag slots include 12–19).
+     * False until player inventory metadata has loaded.
+     */
+    static hasBackpack(): boolean {
+        throw new Error('Must be run inside Hive client');
+    }
+
+    /**
+     * Whether the backpack extender is unlocked (usable bag slots include 20–27).
+     * Extender implies backpack. False until player inventory metadata has loaded.
+     */
+    static hasBackpackExtender(): boolean {
+        throw new Error('Must be run inside Hive client');
+    }
+
     /** Final stats after gear and exaltation bonuses. */
     static getStats(): Stats {
         throw new Error('Must be run inside Hive client');

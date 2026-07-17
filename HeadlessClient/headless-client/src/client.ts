@@ -2159,15 +2159,25 @@ export class Client extends EventEmitter {
   }
 
   /**
-   * Requests that the client walk to the vault portal and enter the vault.
-   * Takes effect once in the nexus; safe to call before or after connecting.
+   * Requests that the character end up inside the Vault.
+   *
+   * - Already in Vault: no-op.
+   * - In Nexus: walk to the vault portal and enter it.
+   * - Anywhere else: escape to Nexus while keeping vault intent, then walk
+   *   to the vault portal once Nexus objects are known.
+   *
+   * Safe to call repeatedly across map transitions.
    */
   enterVault(): void {
     if (this.inVault) {
       return;
     }
     this.wantVault = true;
-    this.findVaultPortal(); // act now if the nexus objects are already known
+    if (this.isInNexus()) {
+      this.findVaultPortal();
+      return;
+    }
+    this.escapePreservingVaultIntent();
   }
 
   /**
@@ -2414,13 +2424,32 @@ export class Client extends EventEmitter {
    * Reconnect, which is followed automatically.
    */
   escape(): void {
+    this.sendEscape({ clearVaultIntent: true });
+  }
+
+  /**
+   * Escape to Nexus for vault entry without clearing `wantVault`.
+   * Normal {@link escape} clears vault intent so leaving the Vault does not
+   * immediately walk back in.
+   */
+  private escapePreservingVaultIntent(): void {
+    this.sendEscape({ clearVaultIntent: false });
+  }
+
+  private sendEscape(options: { clearVaultIntent: boolean }): void {
     if (!this.io) {
       console.log(`${this.tag} escape ignored — not connected`);
       return;
     }
-    console.log(`${this.tag} escaping to the nexus`);
+    console.log(
+      options.clearVaultIntent
+        ? `${this.tag} escaping to the nexus`
+        : `${this.tag} escaping to the nexus (keeping vault intent)`,
+    );
     this.io.send(new EscapePacket());
-    this.wantVault = false; // don't immediately walk back into the vault
+    if (options.clearVaultIntent) {
+      this.wantVault = false; // don't immediately walk back into the vault
+    }
     this.clearNavState();
     this.gameId = GAME_ID.NEXUS;
     this.key = [];
@@ -3108,6 +3137,8 @@ export class Client extends EventEmitter {
     } else if (p.name === 'Nexus') {
       console.log(`${this.tag} entered Nexus`);
       this.emit(ClientEvent.EnterNexus);
+      // Vault intent may have been set before the escape completed.
+      this.findVaultPortal();
     }
     if (this.opts.needsNewChar) {
       this.createCharacter();

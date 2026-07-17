@@ -1,4 +1,4 @@
-import type { InventoryItem, InventoryBackpackTier } from './types/inventory';
+import type { InventoryItem, InventoryBackpackTier, InventoryCapacity } from './types/inventory';
 import type { LootItemEnchantments } from './types/loot';
 import type { StorageItem } from './types/items/StorageItem';
 
@@ -191,6 +191,19 @@ export const inventory = {
    * Derived from wire stat **130** (BackpackTier: `0` / `8` / `16`+) with legacy stat **75** when tier is absent or `0`.
    */
   getBackpack(): InventoryBackpackTier {
+    throw new Error('Must be run inside Hive client');
+  },
+
+  /**
+   * Character-specific usable bag slots (never includes equipment 0–3).
+   * Until backpack metadata is known, returns only guaranteed base slots 4–11.
+   */
+  getCapacity(): InventoryCapacity {
+    throw new Error('Must be run inside Hive client');
+  },
+
+  /** Usable bag slot ids for the current character (see {@link getCapacity}). */
+  getUsableSlotIds(): number[] {
     throw new Error('Must be run inside Hive client');
   },
 

@@ -128,9 +128,12 @@ function subscribe(deps: BridgeDeps, key: LootEventKey, handler: LootHandler): (
 }
 
 function inventoryDestinations(client: Client, useBackpack: boolean): ReturnType<Client['getInventorySlots']> {
-  const maximumSlot = useBackpack ? 11 + client.getBackpackSlotCount() : 11;
+  const slotIds = useBackpack
+    ? client.getCarriedInventorySlotIds()
+    : client.getCarriedInventorySlotIds().filter((slotId) => slotId < 12);
+  const usable = new Set(slotIds);
   return client.getInventorySlots().filter(
-    (slot) => slot.slotId >= 4 && slot.slotId <= maximumSlot && slot.objectType === -1,
+    (slot) => usable.has(slot.slotId) && slot.objectType === -1,
   );
 }
 

@@ -58,7 +58,7 @@ export type {
   PlayerJoinPartyEvent,
   PlayerJoinPartyMatchMode,
 } from './types/events';
-export type { InventoryItem, InventoryBackpackTier } from './types/inventory';
+export type { InventoryItem, InventoryBackpackTier, InventoryCapacity } from './types/inventory';
 export type {
   LootBag,
   LootItem,

@@ -125,8 +125,8 @@ function resolveCombatPathfindingRange(
 function sdkContainerSlots(client: Client, container: InventoryContainer) {
   const slots = client.getContainerSlots(container);
   if (container === 'inventory') {
-    const maximumSlot = 11 + client.getBackpackSlotCount();
-    return slots.filter((slot) => slot.slotId <= maximumSlot);
+    const usable = new Set([0, 1, 2, 3, ...client.getCarriedInventorySlotIds()]);
+    return slots.filter((slot) => usable.has(slot.slotId));
   }
   if (!STORAGE_CONTAINERS.has(container)) return slots;
   return slots.map((slot, slotId) => ({
@@ -295,6 +295,8 @@ export function installHeadlessBridge(deps: BridgeDeps): void {
     return player?.maxMP ? player.mp / player.maxMP : 0;
   };
   Self.getLevel = () => optional(deps)?.getPlayer()?.level ?? 0;
+  Self.hasBackpack = () => optional(deps)?.hasBackpack() ?? false;
+  Self.hasBackpackExtender = () => optional(deps)?.hasBackpackExtender() ?? false;
   Self.getStats = () => headlessStats(deps, 'total');
   Self.getBaseStats = () => headlessStats(deps, 'base');
   Self.getStatCaps = () => {
@@ -724,6 +726,23 @@ export function installHeadlessBridge(deps: BridgeDeps): void {
     return client.getInventorySlots().filter((slot) => carried.has(slot.slotId) && slot.objectType < 0).length;
   };
   inventory.getBackpack = () => optional(deps)?.hasBackpackExtender() ? 3 : optional(deps)?.hasBackpack() ? 2 : 1;
+  inventory.getCapacity = () => {
+    const client = optional(deps);
+    const slotIds = client?.getCarriedInventorySlotIds() ?? [4, 5, 6, 7, 8, 9, 10, 11];
+    const hasBackpackExtender = client?.hasBackpackExtender() ?? false;
+    const hasBackpack = client?.hasBackpack() ?? false;
+    const backpackTier = hasBackpackExtender ? 3 : hasBackpack ? 2 : 1;
+    const endExclusive = slotIds.length > 0 ? slotIds[slotIds.length - 1]! + 1 : 12;
+    return {
+      firstSlot: 4,
+      endExclusive,
+      slotIds: [...slotIds],
+      hasBackpack,
+      hasBackpackExtender,
+      backpackTier: backpackTier as 1 | 2 | 3,
+    };
+  };
+  inventory.getUsableSlotIds = () => inventory.getCapacity().slotIds;
   inventory.getContainerSlots = (container: InventoryContainer) => {
     const client = optional(deps);
     return client ? sdkContainerSlots(client, container) : [];
