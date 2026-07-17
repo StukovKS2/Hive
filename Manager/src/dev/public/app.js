@@ -2343,7 +2343,6 @@
   let scriptsLogSearch = '';
   let scriptsLogPaused = false;
   let scriptsLogAutoScroll = true;
-  let singleClientOnly = true;
   function normalizeAccountLayoutMode(raw) {
     var s = String(raw || '').trim().toLowerCase();
     if (s === 'mac' || s === 'multibox') return 'mac';
@@ -3090,7 +3089,6 @@
   const settingsTabsEl = document.getElementById('settings-tabs');
   const devModeToggle = document.getElementById('setting-dev-mode');
   const adminModeToggle = document.getElementById('setting-admin-mode');
-  const singleClientOnlyToggle = document.getElementById('setting-single-client-only');
   // Sign-out button now lives in the account popup (wired below)
   const themeSelect = document.getElementById('setting-theme-select');
   const langSelect = document.getElementById('setting-language-select');
@@ -3114,7 +3112,6 @@
   const damageFilterEl = document.getElementById('damage-filter');
   const damageSortEl = document.getElementById('damage-sort');
   const damageContextEl = document.getElementById('damage-context');
-  const launchGameBtn = document.getElementById('btn-launch-game');
   const disconnectOverlay = document.getElementById('disconnect-overlay');
   const overlayLoginBtn = document.getElementById('overlay-login-btn');
   const pluginConfigSelect = document.getElementById('setting-plugin-config-select');
@@ -4917,25 +4914,6 @@
     });
   }
 
-  if (singleClientOnlyToggle) {
-    singleClientOnlyToggle.checked = singleClientOnly;
-    singleClientOnlyToggle.addEventListener('change', () => {
-      // Non-admins cannot disable single-client mode
-      if (!dashboardUser || !dashboardUser.is_admin) {
-        singleClientOnlyToggle.checked = true;
-        singleClientOnly = true;
-        return;
-      }
-      singleClientOnly = !!singleClientOnlyToggle.checked;
-      if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({
-          type: 'updateSingleClientOnly',
-          value: singleClientOnly,
-        }));
-      }
-    });
-  }
-
   var packetSnifferToggle = document.getElementById('setting-packet-sniffer-visible');
   if (packetSnifferToggle) {
     packetSnifferToggle.checked = packetSnifferVisible;
@@ -5063,7 +5041,6 @@
     dashboardLoggedIn = false;
     dashboardSubscriptionTier = 'Free';
     adminMode = false;
-    singleClientOnly = true;
     localStorage.removeItem('accessToken');
     localStorage.removeItem('refreshToken');
     localStorage.removeItem('dashboardLoggedIn');
@@ -5210,8 +5187,8 @@
 
   /**
    * Apply UI permissions based on the authenticated account.
-   * - Admins: enable admin mode, can toggle single-client
-   * - Non-admins: force adminMode=false, singleClientOnly=true, lock both
+   * - Admins: enable admin mode
+   * - Non-admins: force adminMode=false
    * - Basic tier (or higher): show developer settings tab
    * - Free tier: hide developer settings tab
    * Called after every successful login/profile fetch.
@@ -5235,20 +5212,6 @@
     }
 
     applyAdminMode();
-
-    // Lock singleClientOnly to true for non-admins
-    if (!isAdmin) {
-      singleClientOnly = true;
-      if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: 'updateSingleClientOnly', value: true }));
-      }
-    }
-    if (singleClientOnlyToggle) {
-      singleClientOnlyToggle.checked = singleClientOnly;
-      singleClientOnlyToggle.disabled = !isAdmin;
-      var scoRow = singleClientOnlyToggle.closest('.settings-row');
-      if (scoRow) scoRow.classList.toggle('settings-row--locked', !isAdmin);
-    }
 
     // Developer settings tab: only for Developer-tier or admins
     var devSettingsTab = document.getElementById('settings-tab-developer');
@@ -17702,8 +17665,10 @@
   }
 
   function launchGameWithCredentials(email, password, serverName, source, launchOpts) {
+    // `source` is a legacy 4th arg (boolean compactWindow or omitted). Ignored —
+    // headless connect does not use Exalt window placement fields.
+    if (source && typeof source === 'object') launchOpts = source;
     launchOpts = launchOpts && typeof launchOpts === 'object' ? launchOpts : {};
-    var compactWindow = typeof source === 'boolean' ? source : !!launchOpts.compactWindow;
     // Arm session tracking for this account so the first gameClient connect
     // we get after this point opens a session under this email.
     try { window._AccountSessions && window._AccountSessions.armLaunch(email); } catch (_) {}
@@ -17724,28 +17689,12 @@
       setAccountsStatus('Launching selected account...', false);
     }
 
-    var wr = launchOpts.windowRect;
-    var hasRect =
-      wr &&
-      Number.isFinite(Number(wr.x)) &&
-      Number.isFinite(Number(wr.y)) &&
-      Number.isFinite(Number(wr.width)) &&
-      Number.isFinite(Number(wr.height));
     var payload = {
       type: 'launchGameWithCredentials',
       email: email,
       password: password,
       serverName: serverName,
-      compactWindow: !!compactWindow && !hasRect,
     };
-    if (hasRect) {
-      payload.windowRect = {
-        x: Math.round(Number(wr.x)),
-        y: Math.round(Number(wr.y)),
-        width: Math.round(Number(wr.width)),
-        height: Math.round(Number(wr.height)),
-      };
-    }
     var aid = launchOpts.accountId != null && String(launchOpts.accountId).trim() !== ''
       ? String(launchOpts.accountId).trim()
       : '';
@@ -17765,28 +17714,13 @@
   function handleConfig(msg) {
     // Capture bot API URL for direct script upload requests
     if (msg.botApiUrl) window._botApiUrl = String(msg.botApiUrl);
-    var isAdminUser = !!(dashboardUser && dashboardUser.is_admin);
-    // Non-admins are always locked to singleClientOnly=true regardless of server config
-    if (isAdminUser) {
-      singleClientOnly = msg.singleClientOnly !== false;
-    } else {
-      singleClientOnly = true;
-    }
     serverPluginConfigId = String(msg.pluginConfigId || '');
     availableServerNames = Array.isArray(msg.serverNames) ? msg.serverNames.slice() : [];
-    if (singleClientOnlyToggle) {
-      singleClientOnlyToggle.checked = singleClientOnly;
-      singleClientOnlyToggle.disabled = !isAdminUser;
-      var scoRow = singleClientOnlyToggle.closest('.settings-row');
-      if (scoRow) scoRow.classList.toggle('settings-row--locked', !isAdminUser);
-    }
     if (serverPluginConfigId) localStorage.setItem('pluginConfigSelected', serverPluginConfigId);
     renderAccountsTab();
 
     updateDashboardAvailabilityUi();
   }
-
-  // ─── Launch game (credentials on Game Not Connected overlay) ───
 
   function setPluginConfigStatus(text, isError) {
     if (!pluginConfigStatus) return;
@@ -17874,10 +17808,6 @@
       .catch(function () {
         setPluginConfigStatus('Failed to load config.', true);
       });
-  }
-
-  function doLaunchGame() {
-    openDashboardTab('accounts');
   }
 
   function setAuthOverlayLoading(loading) {
@@ -17997,7 +17927,6 @@
       });
   }
 
-  if (launchGameBtn) launchGameBtn.addEventListener('click', function () { doLaunchGame(); });
   if (overlayLoginBtn) overlayLoginBtn.addEventListener('click', function () { doDashboardLogin(); });
   var overlayRegisterBtn = document.getElementById('overlay-register-btn');
   if (overlayRegisterBtn) overlayRegisterBtn.addEventListener('click', function () { doRegister(); });

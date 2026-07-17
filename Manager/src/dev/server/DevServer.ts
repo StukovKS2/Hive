@@ -328,10 +328,7 @@ export class DevServer {
      */
     rotmgExtractorGameDataPath?: string;
     lastPluginConfigId?: string;
-    singleClientOnly?: boolean;
-  } = {
-    singleClientOnly: true,
-  };
+  } = {};
   /** Parsed `spritesheet.xml` from extractor dump; invalidated when mtime changes. */
   private wikiSpriteSheetCache: WikiSpriteSheetCache | null = null;
   private serverNames: string[] = [];
@@ -1312,7 +1309,6 @@ export class DevServer {
           rotmgPath: raw.rotmgPath,
           rotmgExtractorGameDataPath: raw.rotmgExtractorGameDataPath,
           lastPluginConfigId: raw.lastPluginConfigId,
-          singleClientOnly: true,
         };
       }
     } catch (err) {
@@ -2155,10 +2151,6 @@ export class DevServer {
     return true;
   }
 
-  private isSingleClientOnlyEnabled(): boolean {
-    return this.config.singleClientOnly !== false;
-  }
-
   /**
    * Call Deca account/verify to get session tokens (account overview / char list).
    */
@@ -2310,7 +2302,6 @@ export class DevServer {
       rotmgPath: this.getRotmgPath() || '',
       rotmgPathSource: this.config.rotmgPath ? 'custom' : (this.detectedGamePath ? 'auto' : 'none'),
       rotmgExtractorGameDataPath: (this.config.rotmgExtractorGameDataPath || '').trim(),
-      singleClientOnly: this.isSingleClientOnlyEnabled(),
       pluginConfigId: this.config.lastPluginConfigId || '',
       serverNames: this.serverNames,
       botApiUrl: BOT_API_URL,
@@ -4653,9 +4644,6 @@ export class DevServer {
           }
           this.wikiSpriteSheetCache = null;
           this.saveConfig();
-          this.broadcastConfig();
-        } else if (msg.type === 'updateSingleClientOnly') {
-          this.config.singleClientOnly = msg.value !== false;
           this.broadcastConfig();
         } else if (msg.type === 'dashboardToken') {
           // Dashboard sends its access+refresh tokens so plugins use the same session
