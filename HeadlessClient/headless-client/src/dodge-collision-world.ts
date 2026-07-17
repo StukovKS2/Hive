@@ -1,4 +1,6 @@
 import type { CombatDataProvider, CombatProjectileSnapshot } from './combat-tracker';
+import type { StaticPassabilityStore } from './static-passability-model';
+import { createStaticPassabilityStore } from './static-passability-store';
 
 interface DodgeObjectRecord {
   key: string;
@@ -71,71 +73,90 @@ export function isEnemyProximityThreat(
   return false;
 }
 
+/**
+ * Killable enemy-tagged objects (destructible walls, crates, etc.) should not
+ * block movement — path through them and shoot to clear. Invincible enemies
+ * still occupy as static geometry.
+ */
+export function isDamageableEnemyObject(
+  definition: { isEnemy?: boolean; invincible?: boolean } | undefined,
+): boolean {
+  return !!definition?.isEnemy && !definition.invincible;
+}
+
+/** Static movement flags after stripping damageable enemy occupy/fullOccupy. */
+export function staticMovementProfile(definition: {
+  occupySquare?: boolean;
+  fullOccupy?: boolean;
+  isEnemy?: boolean;
+  invincible?: boolean;
+} | undefined): { occupySquare: boolean; fullOccupy: boolean } {
+  if (!definition) return { occupySquare: false, fullOccupy: false };
+  if (isDamageableEnemyObject(definition)) {
+    return { occupySquare: false, fullOccupy: false };
+  }
+  return {
+    occupySquare: !!definition.occupySquare,
+    fullOccupy: !!definition.fullOccupy,
+  };
+}
+
 /** Incrementally maintained collision view used by predictive auto-dodge. */
 export class DodgeCollisionWorld {
-  private width = 0;
-  private height = 0;
-  private explorativeUnknown = false;
-  private readonly tiles = new Map<string, number>();
-  private readonly learnedBlocked = new Set<string>();
+  private readonly staticPassability: StaticPassabilityStore;
+  private readonly ownsStaticPassability: boolean;
   private readonly objects = new Map<number, DodgeObjectRecord>();
-  private readonly occupyCounts = new Map<string, number>();
-  private readonly fullOccupyCounts = new Map<string, number>();
   private readonly enemyOccupyCounts = new Map<string, number>();
+  /** OccupySquare cover for projectiles, including damageable enemy walls. */
+  private readonly projectileCoverCounts = new Map<string, number>();
   private readonly confirmedCombatEnemies = new Set<number>();
   private readonly combatEnemies = new Map<number, { x: number; y: number }>();
   private revision = 0;
-  private staticRevision = 0;
   private enemyRevision = 0;
   private cachedSnapshot: CachedLocalSnapshot | undefined;
 
-  constructor(private readonly data: CombatDataProvider) {}
+  constructor(
+    private readonly data: CombatDataProvider,
+    staticPassability?: StaticPassabilityStore,
+  ) {
+    this.staticPassability = staticPassability ?? createStaticPassabilityStore(data);
+    this.ownsStaticPassability = staticPassability === undefined;
+  }
 
   reset(): void {
-    this.width = 0;
-    this.height = 0;
-    this.explorativeUnknown = false;
-    this.tiles.clear();
-    this.learnedBlocked.clear();
+    if (this.ownsStaticPassability) this.staticPassability.reset();
     this.objects.clear();
-    this.occupyCounts.clear();
-    this.fullOccupyCounts.clear();
     this.enemyOccupyCounts.clear();
+    this.projectileCoverCounts.clear();
     this.confirmedCombatEnemies.clear();
     this.combatEnemies.clear();
     this.touch(true, true);
   }
 
   setMapBounds(width: number, height: number): void {
-    const nextWidth = Number.isFinite(width) ? Math.max(0, Math.trunc(width)) : 0;
-    const nextHeight = Number.isFinite(height) ? Math.max(0, Math.trunc(height)) : 0;
-    if (nextWidth === this.width && nextHeight === this.height) return;
-    this.width = nextWidth;
-    this.height = nextHeight;
-    this.touch(true, false);
+    const revisionBefore = this.staticPassability.getRevision();
+    this.staticPassability.setMapBounds(width, height);
+    if (this.staticPassability.getRevision() !== revisionBefore) this.touch(true, false);
   }
 
   observeTile(x: number, y: number, type: number): void {
-    const key = tileKey(Math.trunc(x), Math.trunc(y));
-    const nextType = Math.trunc(type);
-    if (this.tiles.get(key) === nextType) return;
-    this.tiles.set(key, nextType);
-    this.touch(true, false);
+    const revisionBefore = this.staticPassability.getRevision();
+    this.staticPassability.observeTile(x, y, type);
+    if (this.staticPassability.getRevision() !== revisionBefore) this.touch(true, false);
   }
 
   /** Allows in-bounds, unobserved cells while an exploratory path is active. */
   setExplorativeUnknown(enabled: boolean): void {
-    if (this.explorativeUnknown === enabled) return;
-    this.explorativeUnknown = enabled;
-    this.touch(true, false);
+    const revisionBefore = this.staticPassability.getRevision();
+    this.staticPassability.setExplorativeUnknown(enabled);
+    if (this.staticPassability.getRevision() !== revisionBefore) this.touch(true, false);
   }
 
   /** Shares collision cells learned from authoritative pathfinding stalls. */
   markBlocked(x: number, y: number): void {
-    const key = tileKey(Math.floor(x), Math.floor(y));
-    if (this.learnedBlocked.has(key)) return;
-    this.learnedBlocked.add(key);
-    this.touch(true, false);
+    if (this.staticPassability.markLearnedBlocked(Math.floor(x), Math.floor(y))) {
+      this.touch(true, false);
+    }
   }
 
   upsertObject(objectId: number, objectType: number, x: number, y: number): void {
@@ -151,6 +172,7 @@ export class DodgeCollisionWorld {
     }
     const enemyCandidate = !!definition.isEnemy;
     if (!enemyCandidate) this.confirmedCombatEnemies.delete(objectId);
+    const movement = staticMovementProfile(definition);
     const record: DodgeObjectRecord = {
       key: tileKey(Math.floor(x), Math.floor(y)),
       x,
@@ -170,11 +192,14 @@ export class DodgeCollisionWorld {
       || this.confirmedCombatEnemies.has(objectId))) {
       this.combatEnemies.set(objectId, { x, y });
     }
-    this.adjust(this.occupyCounts, record.key, record.occupySquare ? 1 : 0);
-    this.adjust(this.fullOccupyCounts, record.key, record.fullOccupy ? 1 : 0);
     this.adjust(this.enemyOccupyCounts, record.key, record.enemyOccupySquare ? 1 : 0);
+    // Keep projectile cover for damageable walls even though movement ignores them.
+    this.adjust(this.projectileCoverCounts, record.key, record.occupySquare ? 1 : 0);
+    const revisionBefore = this.staticPassability.getRevision();
+    this.staticPassability.upsertObject(objectId, objectType, x, y, movement);
     const nextCombat = this.combatEnemies.get(objectId);
-    const staticChanged = staticCollisionChanged(previous, record);
+    const staticChanged = this.staticPassability.getRevision() !== revisionBefore
+      || staticCollisionChanged(previous, record);
     const enemyChanged = !sameOptionalPosition(previousCombat, nextCombat);
     if (staticChanged || enemyChanged) this.touch(staticChanged, enemyChanged);
   }
@@ -204,10 +229,13 @@ export class DodgeCollisionWorld {
     if (!record) return false;
     this.objects.delete(objectId);
     this.combatEnemies.delete(objectId);
-    this.adjust(this.occupyCounts, record.key, record.occupySquare ? -1 : 0);
-    this.adjust(this.fullOccupyCounts, record.key, record.fullOccupy ? -1 : 0);
     this.adjust(this.enemyOccupyCounts, record.key, record.enemyOccupySquare ? -1 : 0);
-    if (notify) this.touch(recordAffectsStaticCollision(record), record.enemyCandidate);
+    this.adjust(this.projectileCoverCounts, record.key, record.occupySquare ? -1 : 0);
+    const revisionBefore = this.staticPassability.getRevision();
+    this.staticPassability.removeObject(objectId);
+    const staticChanged = this.staticPassability.getRevision() !== revisionBefore
+      || recordAffectsStaticCollision(record);
+    if (notify) this.touch(staticChanged, record.enemyCandidate);
     return true;
   }
 
@@ -235,6 +263,7 @@ export class DodgeCollisionWorld {
     const safeResolution = Number.isFinite(resolution)
       ? Math.min(0.5, Math.max(0.05, resolution))
       : 0.1;
+    const staticRevision = this.staticPassability.getRevision();
     const cached = this.cachedSnapshot;
     const reusableLayout = !!cached
       && cached.snapshot.resolution === safeResolution
@@ -242,7 +271,7 @@ export class DodgeCollisionWorld {
       && Math.abs(center.x - cached.centerX) <= SNAPSHOT_REUSE_PADDING * 0.5
       && Math.abs(center.y - cached.centerY) <= SNAPSHOT_REUSE_PADDING * 0.5;
     if (reusableLayout
-      && cached.staticRevision === this.staticRevision
+      && cached.staticRevision === staticRevision
       && cached.enemyRevision === this.enemyRevision) {
       return cached.snapshot;
     }
@@ -263,7 +292,7 @@ export class DodgeCollisionWorld {
       ? cached.snapshot.height
       : Math.max(2, Math.round((maximumY - originY) / safeResolution) + 1);
     const size = width * height;
-    const reuseStatic = reusableLayout && cached.staticRevision === this.staticRevision;
+    const reuseStatic = reusableLayout && cached.staticRevision === staticRevision;
     const blocked = reuseStatic ? cached.snapshot.blocked : new Uint8Array(size);
     const damagingFloor = reuseStatic
       ? cached.snapshot.damagingFloor
@@ -276,7 +305,7 @@ export class DodgeCollisionWorld {
           const x = originX + column * safeResolution;
           const index = row * width + column;
           blocked[index] = this.canOccupyStatic(x, y, false) ? 0 : 1;
-          const type = this.tiles.get(tileKey(Math.floor(x), Math.floor(y)));
+          const type = this.staticPassability.getObservedTileType(Math.floor(x), Math.floor(y));
           damagingFloor[index] = type === undefined
             ? 0
             : Math.max(0, this.data.getTileDamage?.(type) ?? 0);
@@ -324,7 +353,7 @@ export class DodgeCollisionWorld {
       centerX: reusableLayout ? cached.centerX : center.x,
       centerY: reusableLayout ? cached.centerY : center.y,
       requestedRadius: reusableLayout ? cached.requestedRadius : safeRadius,
-      staticRevision: this.staticRevision,
+      staticRevision,
       enemyRevision: this.enemyRevision,
       snapshot,
     };
@@ -332,41 +361,11 @@ export class DodgeCollisionWorld {
   }
 
   private canOccupyStatic(x: number, y: number, safeWalk: boolean): boolean {
-    const tileX = Math.floor(x);
-    const tileY = Math.floor(y);
-    const key = tileKey(tileX, tileY);
-    const type = this.tiles.get(key);
-    if (!this.inBounds(tileX, tileY)
-      || type === INVALID_TILE_TYPE
-      || type === undefined && !this.explorativeUnknown
-      || this.learnedBlocked.has(key)
-      || type !== undefined && !!this.data.tileIsBlockingWalk?.(type)
-      || type !== undefined && safeWalk && (this.data.getTileDamage?.(type) ?? 0) > 0
-      || (this.occupyCounts.get(key) ?? 0) > 0) {
-      return false;
-    }
-
-    const fracX = x - tileX;
-    const fracY = y - tileY;
-    const minX = fracX < 0.5 ? tileX - 1 : tileX;
-    const maxX = fracX > 0.5 ? tileX + 1 : tileX;
-    const minY = fracY < 0.5 ? tileY - 1 : tileY;
-    const maxY = fracY > 0.5 ? tileY + 1 : tileY;
-    for (let neighborX = minX; neighborX <= maxX; neighborX++) {
-      for (let neighborY = minY; neighborY <= maxY; neighborY++) {
-        if (neighborX === tileX && neighborY === tileY) continue;
-        const key = tileKey(neighborX, neighborY);
-        const neighborType = this.tiles.get(key);
-        if (!this.inBounds(neighborX, neighborY)
-          || neighborType === INVALID_TILE_TYPE
-          || neighborType === undefined && !this.explorativeUnknown
-          || this.learnedBlocked.has(key)
-          || (this.fullOccupyCounts.get(key) ?? 0) > 0) {
-          return false;
-        }
-      }
-    }
-    return true;
+    return this.staticPassability.canOccupyAt(x, y, {
+      consumer: 'dodge',
+      safeWalk,
+      checkFullOccupyNeighbors: true,
+    });
   }
 
   enemyClearance(x: number, y: number): number {
@@ -402,16 +401,14 @@ export class DodgeCollisionWorld {
     const tileX = Math.floor(x);
     const tileY = Math.floor(y);
     const key = tileKey(tileX, tileY);
-    const type = this.tiles.get(key);
-    if (type === undefined || type === INVALID_TILE_TYPE || !this.inBounds(tileX, tileY)) return false;
+    const type = this.staticPassability.getObservedTileType(tileX, tileY);
+    if (type === undefined || type === INVALID_TILE_TYPE || !this.staticPassability.inBounds(tileX, tileY)) {
+      return false;
+    }
     if ((this.enemyOccupyCounts.get(key) ?? 0) > 0) return false;
-    return projectile.definition.passesCover || (this.occupyCounts.get(key) ?? 0) === 0;
-  }
-
-  private inBounds(x: number, y: number): boolean {
-    return x >= 0 && y >= 0
-      && (this.width === 0 || x < this.width)
-      && (this.height === 0 || y < this.height);
+    const hasCover = this.staticPassability.hasOccupySquareAt(tileX, tileY)
+      || (this.projectileCoverCounts.get(key) ?? 0) > 0;
+    return projectile.definition.passesCover || !hasCover;
   }
 
   private adjust(counts: Map<string, number>, key: string, delta: number): void {
@@ -424,7 +421,7 @@ export class DodgeCollisionWorld {
   private touch(staticChanged: boolean, enemyChanged: boolean): void {
     if (!staticChanged && !enemyChanged) return;
     this.revision++;
-    if (staticChanged) this.staticRevision++;
+    if (staticChanged) this.cachedSnapshot = undefined;
     if (enemyChanged) this.enemyRevision++;
   }
 }

@@ -100,6 +100,7 @@ import {
   type CombatPathfindingRange,
 } from './explorative-pathfinder';
 import { DodgeCollisionWorld, ENEMY_AVOID_RADIUS } from './dodge-collision-world';
+import { createStaticPassabilityStore } from './static-passability-store';
 import {
   cloneDodgeMovementIntent,
   normalizeDodgeMovementIntent,
@@ -476,8 +477,11 @@ export class Client extends EventEmitter {
     this.accessToken = opts.accessToken;
     this.clientToken = opts.clientToken;
     this.wantVault = opts.autoEnterVault ?? config.autoEnterVault;
-    this.pathfinder = new ExplorativePathfinder(opts.combatData);
-    this.dodgeWorld = opts.combatData ? new DodgeCollisionWorld(opts.combatData) : undefined;
+    const staticPassability = createStaticPassabilityStore(opts.combatData);
+    this.pathfinder = new ExplorativePathfinder(opts.combatData, staticPassability);
+    this.dodgeWorld = opts.combatData
+      ? new DodgeCollisionWorld(opts.combatData, staticPassability)
+      : undefined;
     this.autoDodge = opts.combatData ? new PredictiveAutoDodgeController() : undefined;
     this.thrownAoes = opts.combatData ? new ThrownAoeTracker() : undefined;
     this.autoNexus = new AutoNexusMonitor((trigger) => {

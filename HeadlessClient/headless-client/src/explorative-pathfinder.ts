@@ -1,9 +1,16 @@
-import { ENEMY_AVOID_RADIUS, isEnemyProximityThreat } from './dodge-collision-world';
+import {
+  ENEMY_AVOID_RADIUS,
+  isEnemyProximityThreat,
+  staticMovementProfile,
+} from './dodge-collision-world';
 import type { DodgeMovementIntentId } from './dodge-movement-intent';
+import type { StaticPassabilityStore } from './static-passability-model';
+import { createStaticPassabilityStore } from './static-passability-store';
 
 export interface PathfindingDataProvider {
   getObject(type: number): {
     occupySquare: boolean;
+    fullOccupy?: boolean;
     isEnemy?: boolean;
     hasProjectiles?: boolean;
     invincible?: boolean;
@@ -82,7 +89,6 @@ interface OpenNode extends GridPoint {
   order: number;
 }
 
-const INVALID_TILE_TYPE = 0xffff;
 const DIAGONAL_COST = Math.SQRT2;
 const INTERMEDIATE_THRESHOLD = 0.25;
 export const MAX_LOCAL_GOAL_DISTANCE = 5;
@@ -117,12 +123,7 @@ const DIRECTIONS: ReadonlyArray<readonly [number, number, number]> = [
  * Unknown cells have exactly the same traversal cost as observed walkable cells.
  */
 export class ExplorativePathfinder {
-  private width = 0;
-  private height = 0;
-  private readonly blockedTerrain = new Set<string>();
-  private readonly learnedBlocked = new Set<string>();
-  private readonly objectTiles = new Map<number, string>();
-  private readonly objectBlockCounts = new Map<string, number>();
+  private readonly staticPassability: StaticPassabilityStore;
   private readonly enemyCandidates = new Map<number, PathPoint>();
   private readonly confirmedCombatEnemies = new Set<number>();
   private readonly combatEnemies = new Map<number, PathPoint>();
@@ -147,15 +148,19 @@ export class ExplorativePathfinder {
   private goalSearchAttemptIndex = 0;
   private goalSearchSessionKey: string | undefined;
 
-  constructor(private readonly data?: PathfindingDataProvider) {}
+  constructor(
+    private readonly data?: PathfindingDataProvider,
+    staticPassability?: StaticPassabilityStore,
+  ) {
+    this.staticPassability = staticPassability ?? createStaticPassabilityStore(data);
+  }
+
+  getStaticPassabilityStore(): StaticPassabilityStore {
+    return this.staticPassability;
+  }
 
   resetMap(): void {
-    this.width = 0;
-    this.height = 0;
-    this.blockedTerrain.clear();
-    this.learnedBlocked.clear();
-    this.objectTiles.clear();
-    this.objectBlockCounts.clear();
+    this.staticPassability.reset();
     this.enemyCandidates.clear();
     this.confirmedCombatEnemies.clear();
     this.combatEnemies.clear();
@@ -164,12 +169,9 @@ export class ExplorativePathfinder {
   }
 
   setMapBounds(width: number, height: number): void {
-    const nextWidth = Number.isFinite(width) ? Math.max(0, Math.trunc(width)) : 0;
-    const nextHeight = Number.isFinite(height) ? Math.max(0, Math.trunc(height)) : 0;
-    if (nextWidth === this.width && nextHeight === this.height) return;
-    this.width = nextWidth;
-    this.height = nextHeight;
-    this.invalidate();
+    const revisionBefore = this.staticPassability.getRevision();
+    this.staticPassability.setMapBounds(width, height);
+    if (this.staticPassability.getRevision() !== revisionBefore) this.invalidate();
   }
 
   setTarget(target: PathPoint, threshold: number, goalId?: DodgeMovementIntentId): boolean {
@@ -272,30 +274,30 @@ export class ExplorativePathfinder {
   }
 
   observeTile(x: number, y: number, tileType: number): void {
-    const key = tileKey(Math.trunc(x), Math.trunc(y));
-    const blocked = tileType === INVALID_TILE_TYPE
-      || !!this.data?.tileIsBlockingWalk?.(tileType)
-      || (this.data?.getTileDamage?.(tileType) ?? 0) > 0;
-    const changed = blocked ? add(this.blockedTerrain, key) : this.blockedTerrain.delete(key);
-    if (changed) this.invalidate();
+    const tileX = Math.trunc(x);
+    const tileY = Math.trunc(y);
+    const blockedBefore = this.staticPassability.isTileStaticallyBlocked(tileX, tileY, {
+      consumer: 'pathfinding',
+    });
+    this.staticPassability.observeTile(x, y, tileType);
+    const blockedAfter = this.staticPassability.isTileStaticallyBlocked(tileX, tileY, {
+      consumer: 'pathfinding',
+    });
+    if (blockedBefore !== blockedAfter) this.invalidate();
   }
 
   upsertObject(objectId: number, objectType: number, x: number, y: number): void {
-    const oldKey = this.objectTiles.get(objectId);
     const definition = this.data?.getObject(objectType);
-    const newKey = definition?.occupySquare ? tileKey(Math.floor(x), Math.floor(y)) : undefined;
-    let changed = false;
-
-    if (oldKey !== newKey && oldKey !== undefined) {
-      this.adjustObjectBlockCount(oldKey, -1);
-      this.objectTiles.delete(objectId);
-      changed = true;
-    }
-    if (oldKey !== newKey && newKey !== undefined) {
-      this.objectTiles.set(objectId, newKey);
-      this.adjustObjectBlockCount(newKey, 1);
-      changed = true;
-    }
+    const revisionBefore = this.staticPassability.getRevision();
+    // Damageable enemy walls/crates are pathable; auto-aim shoots them clear.
+    this.staticPassability.upsertObject(
+      objectId,
+      objectType,
+      x,
+      y,
+      staticMovementProfile(definition),
+    );
+    let changed = this.staticPassability.getRevision() !== revisionBefore;
 
     const oldEnemy = this.combatEnemies.get(objectId);
     const enemyCandidate = !!definition?.isEnemy;
@@ -326,13 +328,9 @@ export class ExplorativePathfinder {
   }
 
   removeObject(objectId: number): void {
-    const key = this.objectTiles.get(objectId);
-    let changed = false;
-    if (key !== undefined) {
-      this.objectTiles.delete(objectId);
-      this.adjustObjectBlockCount(key, -1);
-      changed = true;
-    }
+    const revisionBefore = this.staticPassability.getRevision();
+    this.staticPassability.removeObject(objectId);
+    let changed = this.staticPassability.getRevision() !== revisionBefore;
     this.enemyCandidates.delete(objectId);
     this.confirmedCombatEnemies.delete(objectId);
     if (this.combatEnemies.delete(objectId) && this.combatRange) changed = true;
@@ -357,7 +355,7 @@ export class ExplorativePathfinder {
     if (!target) return {};
     // MAPINFO supplies finite bounds before navigation can prove reachability.
     // Keeping the target pending avoids treating a search budget as "no path".
-    if (this.width <= 0 || this.height <= 0) return {};
+    if (this.staticPassability.getWidth() <= 0 || this.staticPassability.getHeight() <= 0) return {};
     if (this.combatRange && withinCombatRange(position, target, this.combatRange)) {
       this.plan = undefined;
       this.waypointIndex = 0;
@@ -439,7 +437,9 @@ export class ExplorativePathfinder {
     maxNodesPerStep: number | readonly number[] = Number.POSITIVE_INFINITY,
   ): GridPoint[] | undefined {
     const target = this.target;
-    if (!target || this.width <= 0 || this.height <= 0) return undefined;
+    if (!target || this.staticPassability.getWidth() <= 0 || this.staticPassability.getHeight() <= 0) {
+      return undefined;
+    }
     const start = { x: Math.floor(position.x), y: Math.floor(position.y) };
     return this.searchRawTiles(start, target, maxNodesPerStep);
   }
@@ -469,10 +469,19 @@ export class ExplorativePathfinder {
     const currentIndex = plan.routeTiles.findIndex((point) => tileKey(point.x, point.y) === currentKey);
     const blocked = plan.routeTiles[currentIndex >= 0 ? currentIndex + 1 : 0];
     if (!blocked || tileKey(blocked.x, blocked.y) === plan.startKey) return undefined;
-    if (add(this.learnedBlocked, tileKey(blocked.x, blocked.y))) {
+    // Stalling against a shootable enemy wall is expected — keep retrying the route.
+    if (this.hasDamageableEnemyAt(blocked.x, blocked.y)) return undefined;
+    if (this.staticPassability.markLearnedBlocked(blocked.x, blocked.y)) {
       this.invalidate();
     }
     return { x: blocked.x, y: blocked.y };
+  }
+
+  private hasDamageableEnemyAt(tileX: number, tileY: number): boolean {
+    for (const enemy of this.enemyCandidates.values()) {
+      if (Math.floor(enemy.x) === tileX && Math.floor(enemy.y) === tileY) return true;
+    }
+    return false;
   }
 
   private finishTarget(): PathfindingStep {
@@ -888,12 +897,10 @@ export class ExplorativePathfinder {
   }
 
   private isBlocked(x: number, y: number, start?: GridPoint): boolean {
-    if (start && x === start.x && y === start.y) return false;
-    if (!this.inBounds(x, y)) return true;
-    const key = tileKey(x, y);
-    return this.blockedTerrain.has(key)
-      || this.learnedBlocked.has(key)
-      || (this.objectBlockCounts.get(key) ?? 0) > 0;
+    return this.staticPassability.isTileStaticallyBlocked(x, y, {
+      consumer: 'pathfinding',
+      exemptTile: start,
+    });
   }
 
   private isPathBlocked(x: number, y: number, start?: GridPoint): boolean {
@@ -920,15 +927,7 @@ export class ExplorativePathfinder {
   }
 
   private inBounds(x: number, y: number): boolean {
-    return x >= 0 && y >= 0
-      && (this.width === 0 || x < this.width)
-      && (this.height === 0 || y < this.height);
-  }
-
-  private adjustObjectBlockCount(key: string, delta: number): void {
-    const count = (this.objectBlockCounts.get(key) ?? 0) + delta;
-    if (count > 0) this.objectBlockCounts.set(key, count);
-    else this.objectBlockCounts.delete(key);
+    return this.staticPassability.inBounds(x, y);
   }
 
   private invalidate(): void {
@@ -1385,8 +1384,3 @@ function violatesExclusion(
     || pointDistance <= startDistance + DISTANCE_EPSILON;
 }
 
-function add(values: Set<string>, value: string): boolean {
-  if (values.has(value)) return false;
-  values.add(value);
-  return true;
-}
